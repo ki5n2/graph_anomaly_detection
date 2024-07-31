@@ -48,8 +48,8 @@ print(f'Number of edge features: {dataset_AIDS.num_edge_features}')
 #%%
 train_data, test_data = train_test_split(dataset_AIDS, test_size=0.2, random_state=42)
 
-train_loader = DataLoader(train_data, batch_size=150, shuffle=True)
-test_loader = DataLoader(test_data, batch_size=150, shuffle=False)
+train_loader = DataLoader(train_data, batch_size=128, shuffle=True)
+test_loader = DataLoader(test_data, batch_size=128, shuffle=False)
 
 
 #%%  
@@ -166,9 +166,11 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
             
         # self.classifiers.append(nn.Linear(hidden_dims[-1], 2))  # Assume last encoder output dimension for simplicity        
         self.classifiers = nn.Sequential(
-            nn.Linear(hidden_dims[-1], 32),  # Reduce dimension to a smaller space
+            nn.Linear(hidden_dims[-1], hidden_dims[1]),  # Reduce dimension to a smaller space
             nn.ReLU(),
-            nn.Linear(32, 1),
+            nn.Linear(hidden_dims[1], 16),  # Reduce dimension to a smaller space
+            nn.ReLU(),
+            nn.Linear(16, 1),
             nn.Sigmoid()
             )    
         
@@ -196,7 +198,7 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
         
         # reconstruction adjacency matrix
         adj_recon_list, adj_recon_prime_list = adj_recon(z, z_prime, batch)
-    
+        
         # node reconstruction
         x_recon = self.decode(z)
         x_recon_prime = self.decode(z_prime)
@@ -240,6 +242,7 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
             bn_module = nn.BatchNorm1d(x.size()[1]).to('cuda')
             x = bn_module(x)
         x = self.encoders[-1](x, edge_index)
+        x = F.normalize(x, p=2, dim=1)
         return x
 
     def decode(self, x):
@@ -254,6 +257,7 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
             bn_module = nn.BatchNorm1d(x.size()[1]).to('cuda')
             x = bn_module(x)
         x = self.encoders_node[-1](x)
+        x = F.normalize(x, p=2, dim=1)
         return x
 
     def classify(self, x):
@@ -267,6 +271,7 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
             bn_module = nn.BatchNorm1d(x.size()[1]).to('cuda')
             x = bn_module(x)
         x = self.encoders[-1](x, edge_index)
+        x = F.normalize(x, p=2, dim=1)
         return x
    
     def process_subgraphs(self, subgraphs):
@@ -290,11 +295,11 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
 
 #%%
 num_features = dataset_AIDS.num_features
-hidden_dims=[256, 128]
+hidden_dims=[256, 128, 64]
 
 model = GRAPH_AUTOENCODER(num_features, hidden_dims).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
-criterion_node = torch.nn.MSELoss()
+criterion_node = torch.nn.L1Loss()
 criterion_label = nn.BCELoss()
     
 def train(model, train_loader, optimizer, criterion_node, criterion_label):
@@ -315,7 +320,7 @@ def train(model, train_loader, optimizer, criterion_node, criterion_label):
 
             node_loss_1 = criterion_node(x_recon[start_node:end_node], data.x[start_node:end_node])
             node_loss_2 = criterion_node(x_recon_prime[start_node:end_node], data.x[start_node:end_node])
-            node_loss = (node_loss_1 + node_loss_2) * 4
+            node_loss = (node_loss_1 + node_loss_2)
             
             edge_loss_1 = F.binary_cross_entropy(adj_recon_list[i], adj[i])
             edge_loss_2 = F.binary_cross_entropy(adj_recon_prime_list[i], adj[i])
@@ -371,7 +376,7 @@ def evaluate_model(model, test_loader):
                 # data.y maybe (batch_size)
                 class_loss_graph = criterion_label(graph_pred[i][0], data.y[i].float())
                 class_loss_pos_sub = criterion_label(pos_sub_graph_pred[i][0], data.y[i].float())
-                class_loss = (class_loss_graph + class_loss_pos_sub) / 3
+                class_loss = (class_loss_graph + class_loss_pos_sub) / 2
             
                 recon_error += node_recon_error + edge_recon_error + class_loss
                 recon_error_list.append(recon_error)
