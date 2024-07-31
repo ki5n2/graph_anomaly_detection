@@ -12,7 +12,7 @@ def set_device():
 
     return device
 
-def add_gaussian_perturbation(z, epsilon=1):
+def add_gaussian_perturbation(z, epsilon=0.5):
     """
     Add Gaussian perturbations to the encoder output z to create z'
     :param z: torch.Tensor, the output of the encoder
