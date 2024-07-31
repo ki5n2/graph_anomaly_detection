@@ -38,18 +38,23 @@ os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 dataset_AIDS = TUDataset(root='./dataset', name='AIDS')
 dataset_AIDS = dataset_AIDS.shuffle()
 
-dataset_AIDS
-
 print(f'Number of graphs: {len(dataset_AIDS)}')
 print(f'Number of features: {dataset_AIDS.num_features}')
 print(f'Number of edge features: {dataset_AIDS.num_edge_features}')
 
 
 #%%
-train_data, test_data = train_test_split(dataset_AIDS, test_size=0.2, random_state=42)
+dataset_normal = [data for data in dataset_AIDS if data.y.item() == 1]
+dataset_anomaly = [data for data in dataset_AIDS if data.y.item() == 0]
+train_data, test_data = train_test_split(dataset_normal, test_size=0.125, random_state=42)
+evaluation_data = test_data + dataset_anomaly
 
 train_loader = DataLoader(train_data, batch_size=128, shuffle=True)
-test_loader = DataLoader(test_data, batch_size=128, shuffle=False)
+test_loader = DataLoader(evaluation_data, batch_size=128, shuffle=False)
+
+print(f"Number of positive samples: {len(dataset_normal)}")
+print(f"Number of negative samples: {len(dataset_anomaly)}")
+print(f"Number of samples in the evaluation dataset: {len(evaluation_data)}")
 
 
 #%%  
@@ -115,6 +120,12 @@ def visualize(graph, color='skyblue', edge_color='blue'):
                  node_color=color, edge_color=edge_color)
 
 
+#%%
+dataset_AIDS[0]
+for i in range(10, 15):
+    visualize(dataset_AIDS[16])
+    
+    
 #%%
 class Triplet_Loss(nn.Module):
     def __init__(self, margin=1.0):
@@ -201,12 +212,12 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
         
         # node reconstruction
         x_recon = self.decode(z)
-        x_recon_prime = self.decode(z_prime)
+        # x_recon_prime = self.decode(z_prime)
         
         # Graph classification
         z_pool = global_mean_pool(z, batch)  # Aggregate features for classification
         # (batch_size, 2)
-        graph_pred = self.classify(z_pool)
+        # graph_pred = self.classify(z_pool)
         
         # subgraph
         batched_pos_subgraphs, batched_neg_subgraphs, batched_target_node_features = batch_nodes_subgraphs(data)
@@ -221,7 +232,7 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
         
         unique_pos_batch, new_pos_batch = torch.unique(pos_batch, return_inverse=True)
         pos_sub_z_pool = global_mean_pool(pos_sub_z, new_pos_batch)
-        pos_sub_graph_pred = self.classify(pos_sub_z_pool)
+        # pos_sub_graph_pred = self.classify(pos_sub_z_pool)
         
         neg_x, neg_edge_index, neg_batch = batched_neg_subgraphs.x, batched_neg_subgraphs.edge_index, batched_neg_subgraphs.batch
         neg_sub_z, neg_new_edge_index = self.process_subgraphs(batched_neg_subgraphs)
@@ -234,7 +245,7 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
         # pos_adj = to_dense_adj(pos_new_edge_index, new_pos_batch, max_num_nodes=pos_x.shape[0])[0]
         # neg_adj = to_dense_adj(neg_new_edge_index, new_neg_batch, max_num_nodes=neg_x.shape[0])[0]
 
-        return adj, x_recon, x_recon_prime, adj_recon_list, adj_recon_prime_list, graph_pred, target_z, pos_sub_graph_pred, pos_sub_z_pool, neg_sub_z_pool
+        return adj, x_recon, adj_recon_list, target_z, pos_sub_z_pool, neg_sub_z_pool
     
     def encode(self, x, edge_index):
         for encoder in self.encoders[:-1]:
@@ -308,7 +319,7 @@ def train(model, train_loader, optimizer, criterion_node, criterion_label):
     for data in train_loader:
         data = data.to(device)
         optimizer.zero_grad()
-        adj, x_recon, x_recon_prime, adj_recon_list, adj_recon_prime_list, graph_pred, target_z, pos_sub_graph_pred, pos_sub_z_pool, neg_sub_z_pool = model(data)
+        adj, x_recon, adj_recon_list, target_z, pos_sub_z_pool, neg_sub_z_pool = model(data)
         # adj_list = to_dense_adj(data.edge_index, batch=data.batch)
         
         loss = 0
@@ -317,22 +328,22 @@ def train(model, train_loader, optimizer, criterion_node, criterion_label):
         for i in range(len(data)): # 각 그래프별로 손실 계산
             num_nodes = (data.batch == i).sum().item() # 현재 그래프에 속하는 노드 수
             end_node = start_node + num_nodes
-
-            node_loss_1 = criterion_node(x_recon[start_node:end_node], data.x[start_node:end_node])
-            node_loss_2 = criterion_node(x_recon_prime[start_node:end_node], data.x[start_node:end_node])
-            node_loss = (node_loss_1 + node_loss_2)
             
-            edge_loss_1 = F.binary_cross_entropy(adj_recon_list[i], adj[i])
-            edge_loss_2 = F.binary_cross_entropy(adj_recon_prime_list[i], adj[i])
-            edge_loss = (edge_loss_1 + edge_loss_2) / 2
+            node_loss_1 = torch.norm(x_recon[start_node:end_node] - data.x[start_node:end_node], p='fro')**2
+            # node_loss_2 = criterion_node(x_recon_prime[start_node:end_node], data.x[start_node:end_node])
+            node_loss = node_loss_1 / 100
+            
+            edge_loss_1 = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2
+            # edge_loss_2 = F.binary_cross_entropy(adj_recon_prime_list[i], adj[i])
+            edge_loss = edge_loss_1 / 50
             
             # graph_pred.shape -> (batch_size, 2)
             # data.y maybe (batch_size)
-            class_loss_graph = criterion_label(graph_pred[i][0], data.y[i].float())
-            class_loss_pos_sub = criterion_label(pos_sub_graph_pred[i][0], data.y[i].float())
-            class_loss = (class_loss_graph + class_loss_pos_sub) * 2
+            # class_loss_graph = criterion_label(graph_pred[i][0], data.y[i].float())
+            # class_loss_pos_sub = criterion_label(pos_sub_graph_pred[i][0], data.y[i].float())
+            # class_loss = (class_loss_graph + class_loss_pos_sub) / 10
             
-            loss += node_loss + edge_loss + class_loss
+            loss += node_loss + edge_loss
             
             start_node = end_node
         
@@ -354,7 +365,7 @@ def evaluate_model(model, test_loader):
     with torch.no_grad():
         for data in test_loader:
             data = data.to(device)  # Move data to the MPS device
-            adj, x_recon, x_recon_prime, adj_recon_list, adj_recon_prime_list, graph_pred, target_z, pos_sub_graph_pred, pos_sub_z_pool, neg_sub_z_pool = model(data)  # 모델 예측값
+            adj, x_recon, adj_recon_list, target_z, pos_sub_z_pool, neg_sub_z_pool = model(data)  # 모델 예측값
             
             recon_error_list = []
             start_node = 0
@@ -364,21 +375,21 @@ def evaluate_model(model, test_loader):
                 num_nodes = (data.batch == i).sum().item() # 현재 그래프에 속하는 노드 수
                 end_node = start_node + num_nodes
 
-                node_recon_1 = criterion_node(x_recon[start_node:end_node], data.x[start_node:end_node])
-                node_recon_2 = criterion_node(x_recon_prime[start_node:end_node], data.x[start_node:end_node])
-                node_recon_error = (node_recon_1 + node_recon_2) * 2
+                node_recon_1 = torch.norm(x_recon[start_node:end_node] - data.x[start_node:end_node], p='fro')**2
+                # node_recon_2 = criterion_node(x_recon_prime[start_node:end_node], data.x[start_node:end_node])
+                node_recon_error = node_recon_1 / 100
              
-                edge_recon_1 = F.binary_cross_entropy(adj_recon_list[i], adj[i])
-                edge_recon_2 = F.binary_cross_entropy(adj_recon_prime_list[i], adj[i])
-                edge_recon_error = (edge_recon_1 + edge_recon_2) / 2
+                edge_recon_1 = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2
+                # edge_recon_2 = F.binary_cross_entropy(adj_recon_prime_list[i], adj[i])
+                edge_recon_error = edge_recon_1 / 50
             
                 # graph_pred.shape -> (batch_size, 2)
                 # data.y maybe (batch_size)
-                class_loss_graph = criterion_label(graph_pred[i][0], data.y[i].float())
-                class_loss_pos_sub = criterion_label(pos_sub_graph_pred[i][0], data.y[i].float())
-                class_loss = (class_loss_graph + class_loss_pos_sub) / 2
+                # class_loss_graph = criterion_label(graph_pred[i][0], data.y[i].float())
+                # class_loss_pos_sub = criterion_label(pos_sub_graph_pred[i][0], data.y[i].float())
+                # class_loss = (class_loss_graph + class_loss_pos_sub) / 5
             
-                recon_error += node_recon_error + edge_recon_error + class_loss
+                recon_error += node_recon_error + edge_recon_error
                 recon_error_list.append(recon_error)
                 
                 start_node = end_node
@@ -410,5 +421,5 @@ for epoch in range(epochs):
     auc_score = evaluate_model(model, test_loader)
     print(f'Epoch {epoch+1}: Validation AUC = {auc_score:.4f}')
     
-            
+
 # %%
