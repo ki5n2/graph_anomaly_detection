@@ -12,7 +12,7 @@ from torch.nn import init
 from torch_geometric.data import DataLoader, Dataset, Data, Batch
 from torch_geometric.datasets import TUDataset, QM9
 from torch_geometric.loader import DataLoader
-from torch_geometric.nn import GATConv, GCNConv, global_mean_pool, GAE, InnerProductDecoder
+from torch_geometric.nn import GATConv, GCNConv, global_mean_pool, global_max_pool, GAE, InnerProductDecoder
 from torch_geometric.utils import k_hop_subgraph, to_dense_adj, subgraph, to_undirected, to_networkx
 from torch_geometric.transforms import BaseTransform
 
@@ -144,6 +144,27 @@ class Triplet_Loss(nn.Module):
 Triplet_loss = Triplet_Loss(margin=1.0)
 
 
+def contrastive_loss(z_i, z_j, temperature):
+    """
+    Calculates the contrastive loss between two sets of graph embeddings.
+    
+    Args:
+    z_i (torch.Tensor): Batch of graph embeddings.
+    z_j (torch.Tensor): Batch of perturbed graph embeddings.
+    temperature (float): Temperature parameter for scaling.
+
+    Returns:
+    torch.Tensor: Calculated loss.
+    """
+    # Calculate cosine similarity
+    similarities = F.cosine_similarity(z_i.unsqueeze(1), z_j.unsqueeze(0), dim=2) / temperature
+    
+    # Compute log softmax over similarities
+    loss = -torch.mean(torch.diag(F.log_softmax(similarities, dim=1)))
+
+    return loss
+
+
 # %%
 class GRAPH_AUTOENCODER(torch.nn.Module):
     def __init__(self, num_features, hidden_dims):
@@ -154,6 +175,7 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
         self.classifiers = torch.nn.ModuleList()
         self.encoders_subgraphs = torch.nn.ModuleList()
         self.act = nn.ReLU()
+        self.projection_head = nn.Sequential(nn.Linear(hidden_dims[-1], hidden_dims[-1]), nn.ReLU(inplace=True), nn.Linear(hidden_dims[-1], hidden_dims[-1]))
 
         current_dim = num_features
         for hidden_dim in hidden_dims:
@@ -197,8 +219,6 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
         x, edge_index, batch = data.x, data.edge_index, data.batch
 
         # adjacency matrix
-        # adj = to_dense_adj(edge_index, batch, max_num_nodes=x.shape[0])[0]
-        
         adj = adj_original(edge_index, batch)
             
         # latent vector
@@ -207,45 +227,38 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
         # perturbation
         z_prime = add_gaussian_perturbation(z)
         
-        # reconstruction adjacency matrix
+        # adjacency matrix reconstruction
         adj_recon_list, adj_recon_prime_list = adj_recon(z, z_prime, batch)
         
         # node reconstruction
         x_recon = self.decode(z)
-        # x_recon_prime = self.decode(z_prime)
         
         # Graph classification
-        z_pool = global_mean_pool(z, batch)  # Aggregate features for classification
-        # (batch_size, 2)
-        # graph_pred = self.classify(z_pool)
+        z_g = global_max_pool(z, batch)  # Aggregate features for classification
+        z_prime_g = global_max_pool(z_prime, batch) # (batch_size, embedded size)
+        z_g_mlp = self.projection_head(z_g)
+        z_prime_g_mlp = self.projection_head(z_prime_g) # (batch_size, embedded size)
         
         # subgraph
         batched_pos_subgraphs, batched_neg_subgraphs, batched_target_node_features = batch_nodes_subgraphs(data)
-        
-        # target_z = classifiers_(batched_target_node_features)
-        # (batch_size, feature_size)
-        target_z = self.encode_node(batched_target_node_features)
         
         pos_x, pos_edge_index, pos_batch = batched_pos_subgraphs.x, batched_pos_subgraphs.edge_index, batched_pos_subgraphs.batch
         pos_sub_z, pos_new_edge_index = self.process_subgraphs(batched_pos_subgraphs)
         pos_sub_z = torch.cat(pos_sub_z) # (number of nodes, embedded size)
         
         unique_pos_batch, new_pos_batch = torch.unique(pos_batch, return_inverse=True)
-        pos_sub_z_pool = global_mean_pool(pos_sub_z, new_pos_batch)
-        # pos_sub_graph_pred = self.classify(pos_sub_z_pool)
+        pos_sub_z_g = global_mean_pool(pos_sub_z, new_pos_batch)
         
         neg_x, neg_edge_index, neg_batch = batched_neg_subgraphs.x, batched_neg_subgraphs.edge_index, batched_neg_subgraphs.batch
         neg_sub_z, neg_new_edge_index = self.process_subgraphs(batched_neg_subgraphs)
         neg_sub_z = torch.cat(neg_sub_z)
         
         unique_neg_batch, new_neg_batch = torch.unique(neg_batch, return_inverse=True)
-        neg_sub_z_pool = global_mean_pool(neg_sub_z, new_neg_batch)
-        neg_sub_graph_pred = self.classify(neg_sub_z_pool)
+        neg_sub_z_g = global_mean_pool(neg_sub_z, new_neg_batch)
         
-        # pos_adj = to_dense_adj(pos_new_edge_index, new_pos_batch, max_num_nodes=pos_x.shape[0])[0]
-        # neg_adj = to_dense_adj(neg_new_edge_index, new_neg_batch, max_num_nodes=neg_x.shape[0])[0]
-
-        return adj, x_recon, adj_recon_list, target_z, pos_sub_z_pool, neg_sub_z_pool
+        target_z = self.encode_node(batched_target_node_features) # (batch_size, feature_size)
+        
+        return adj, z, x_recon, adj_recon_list, pos_sub_z_g, neg_sub_z_g, z_g_mlp, z_prime_g_mlp, target_z
     
     def encode(self, x, edge_index):
         for encoder in self.encoders[:-1]:
@@ -313,13 +326,13 @@ optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
 criterion_node = torch.nn.L1Loss()
 criterion_label = nn.BCELoss()
     
-def train(model, train_loader, optimizer, criterion_node, criterion_label):
+def train(model, train_loader, optimizer, criterion_node, criterion_label, threshold=0.5):
     model.train()
     total_loss = 0
     for data in train_loader:
         data = data.to(device)
         optimizer.zero_grad()
-        adj, x_recon, adj_recon_list, target_z, pos_sub_z_pool, neg_sub_z_pool = model(data)
+        adj, z, x_recon, adj_recon_list, pos_sub_z_g, neg_sub_z_g, z_g_mlp, z_prime_g_mlp, target_z = model(data)
         # adj_list = to_dense_adj(data.edge_index, batch=data.batch)
         
         loss = 0
@@ -331,24 +344,27 @@ def train(model, train_loader, optimizer, criterion_node, criterion_label):
             
             node_loss_1 = torch.norm(x_recon[start_node:end_node] - data.x[start_node:end_node], p='fro')**2
             # node_loss_2 = criterion_node(x_recon_prime[start_node:end_node], data.x[start_node:end_node])
-            node_loss = node_loss_1 / 100
+            node_loss = node_loss_1 / 200
             
             edge_loss_1 = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2
             # edge_loss_2 = F.binary_cross_entropy(adj_recon_prime_list[i], adj[i])
-            edge_loss = edge_loss_1 / 50
+            edge_loss = edge_loss_1 / 100
             
-            # graph_pred.shape -> (batch_size, 2)
-            # data.y maybe (batch_size)
-            # class_loss_graph = criterion_label(graph_pred[i][0], data.y[i].float())
-            # class_loss_pos_sub = criterion_label(pos_sub_graph_pred[i][0], data.y[i].float())
-            # class_loss = (class_loss_graph + class_loss_pos_sub) / 10
+            edges = (adj_recon_list[i] > threshold).nonzero(as_tuple=False)
+            edge_index = edges.t()
             
-            loss += node_loss + edge_loss
+            z_tilde =  model.encode(x_recon, edge_index).to('cuda')
+            
+            graph_recon_loss_ = torch.norm(z[i] - z_tilde[i], p='fro')**2
+            graph_recon_loss = graph_recon_loss_ / 20
+            
+            loss += node_loss + edge_loss + graph_recon_loss
             
             start_node = end_node
         
-        triplet_loss = torch.sum(Triplet_loss(target_z, pos_sub_z_pool, neg_sub_z_pool))
-        loss += triplet_loss
+        triplet_loss = torch.sum(Triplet_loss(target_z, pos_sub_z_g, neg_sub_z_g))
+        contrast_loss = contrastive_loss(z_g_mlp, z_prime_g_mlp, temperature=0.1)
+        loss += triplet_loss + contrast_loss
         
         loss.backward()
         optimizer.step()
@@ -357,7 +373,7 @@ def train(model, train_loader, optimizer, criterion_node, criterion_label):
 
 
 #%%
-def evaluate_model(model, test_loader):
+def evaluate_model(model, test_loader, threshold = 0.5):
     model.eval()
     true_labels = []
     pred_probs = []
@@ -365,7 +381,7 @@ def evaluate_model(model, test_loader):
     with torch.no_grad():
         for data in test_loader:
             data = data.to(device)  # Move data to the MPS device
-            adj, x_recon, adj_recon_list, target_z, pos_sub_z_pool, neg_sub_z_pool = model(data)  # 모델 예측값
+            adj, z, x_recon, adj_recon_list, pos_sub_z_g, neg_sub_z_g, z_g_mlp, z_prime_g_mlp, target_z = model(data)  # 모델 예측값
             
             recon_error_list = []
             start_node = 0
@@ -377,19 +393,21 @@ def evaluate_model(model, test_loader):
 
                 node_recon_1 = torch.norm(x_recon[start_node:end_node] - data.x[start_node:end_node], p='fro')**2
                 # node_recon_2 = criterion_node(x_recon_prime[start_node:end_node], data.x[start_node:end_node])
-                node_recon_error = node_recon_1 / 100
+                node_recon_error = node_recon_1 / 200
              
                 edge_recon_1 = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2
                 # edge_recon_2 = F.binary_cross_entropy(adj_recon_prime_list[i], adj[i])
-                edge_recon_error = edge_recon_1 / 50
+                edge_recon_error = edge_recon_1 / 100
+                
+                edges = (adj_recon_list[i] > threshold).nonzero(as_tuple=False)
+                edge_index = edges.t()
+                
+                z_tilde =  model.encode(x_recon, edge_index).to('cuda')
             
-                # graph_pred.shape -> (batch_size, 2)
-                # data.y maybe (batch_size)
-                # class_loss_graph = criterion_label(graph_pred[i][0], data.y[i].float())
-                # class_loss_pos_sub = criterion_label(pos_sub_graph_pred[i][0], data.y[i].float())
-                # class_loss = (class_loss_graph + class_loss_pos_sub) / 5
+                graph_recon_loss_ = torch.norm(z[i] - z_tilde[i], p='fro')**2
+                graph_recon_loss = graph_recon_loss_ / 20
             
-                recon_error += node_recon_error + edge_recon_error
+                recon_error += node_recon_error + edge_recon_error + graph_recon_loss
                 recon_error_list.append(recon_error)
                 
                 start_node = end_node
@@ -412,7 +430,7 @@ def evaluate_model(model, test_loader):
 
 
 #%%
-epochs = 100
+epochs = 20
 for epoch in range(epochs):
     train_loss = train(model, train_loader, optimizer, criterion_node, criterion_label)
     print(f'Epoch {epoch+1}: Training Loss = {train_loss:.4f}')
