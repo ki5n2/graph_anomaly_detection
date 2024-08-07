@@ -1,6 +1,8 @@
 import torch
+import networkx as nx
+
 from torch_geometric.data import Batch
-from torch_geometric.utils import to_undirected, to_dense_adj
+from torch_geometric.utils import to_dense_adj, to_undirected, to_networkx
 
 def set_device():
     if torch.cuda.is_available():
@@ -145,3 +147,10 @@ def adj_recon(z, z_prime, batch):
         adj_recon_prime_list.append(adj_recon_prime_graph)
                 
     return adj_recon_list, adj_recon_prime_list
+
+
+def visualize(graph, color='skyblue', edge_color='blue'):
+    G = to_networkx(graph, to_undirected=True)
+    nx.draw_networkx(G, pos=nx.spring_layout(G, seed=42), with_labels=True,
+                     node_color=color, edge_color=edge_color)
+
