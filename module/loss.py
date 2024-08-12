@@ -20,3 +20,10 @@ def loss_cal(z_i, z_j, t=0.2):
     loss = pos_sim / (sim_matrix.sum(dim=1) - pos_sim)
     loss = - torch.log(loss).mean()
     return loss
+
+
+def focal_loss(pred, target, gamma=2, alpha=0.25):
+    bce_loss = F.binary_cross_entropy_with_logits(pred, target, reduction='none')
+    pt = torch.exp(-bce_loss)
+    focal_loss = alpha * (1 - pt) ** gamma * bce_loss
+    return focal_loss.mean()
