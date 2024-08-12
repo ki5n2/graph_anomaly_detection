@@ -13,6 +13,8 @@ import matplotlib.pyplot as plt
 import torch.nn.functional as F
 
 from torch.nn import init
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+
 from torch_geometric.loader import DataLoader
 from torch_geometric.datasets import TUDataset
 from torch_geometric.transforms import BaseTransform
@@ -44,19 +46,20 @@ def train(model, train_loader, optimizer, scheduler, threshold=0.5):
         for i in range(data.num_graphs): # 각 그래프별로 손실 계산
             num_nodes = (data.batch == i).sum().item() # 현재 그래프에 속하는 노드 수
             end_node = start_node + num_nodes
-    
             graph_num_nodes = end_node - start_node        
-            node_loss = torch.norm(x_recon[start_node:end_node] - data.x[start_node:end_node], p='fro')**2
-            graph_node_loss = node_loss/graph_num_nodes
+            
             # node_loss_2 = criterion_node(x_recon_prime[start_node:end_node], data.x[start_node:end_node])
             # node_loss = node_loss_1 / 200
             
             edge_loss = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2
             graph_edge_loss = edge_loss/graph_num_nodes
+            l1_loss = graph_edge_loss / 30
+            
+            # focal_loss_value = focal_loss(adj_recon_list[i], adj[i], gamma=2, alpha=0.25)
+            # l1_loss = focal_loss_value
+            # graph_edge_loss = focal_loss_value/graph_num_nodes
             # edge_loss_2 = F.binary_cross_entropy(adj_recon_prime_list[i], adj[i])
             # edge_loss = edge_loss_1 / 100
-            
-            l1_loss = (graph_node_loss / 30) + (graph_edge_loss / 10)
             
             edges = (adj_recon_list[i] > threshold).nonzero(as_tuple=False)
             edge_index = edges.t()
@@ -68,15 +71,17 @@ def train(model, train_loader, optimizer, scheduler, threshold=0.5):
             graph_z_node_loss = recon_z_node_loss/graph_num_nodes
             
             recon_z_graph_loss = torch.norm(z_g[i] - z_tilde_g[i], p='fro')**2
-            l3_loss = (graph_z_node_loss / 5) + (recon_z_graph_loss / 5)
-                        
+            l3_loss = (graph_z_node_loss / 10) + (recon_z_graph_loss / 10)
             loss += l1_loss + l3_loss
             
             start_node = end_node
         
-        triplet_loss = torch.sum(Triplet_loss(target_z, pos_sub_z_g, neg_sub_z_g)) / 3
-        l2_loss = torch.sum(loss_cal(z_prime_g_mlp, z_g_mlp)) * 10
-        loss += (triplet_loss + l2_loss)*3/2
+        node_loss = torch.norm(x_recon - data.x, p='fro')**2
+        node_loss = (node_loss/x_recon.size(0))
+        
+        triplet_loss = torch.sum(Triplet_loss(target_z, pos_sub_z_g, neg_sub_z_g)) / 10
+        l2_loss = torch.sum(loss_cal(z_prime_g_mlp, z_g_mlp)) * 3
+        loss += node_loss + triplet_loss + l2_loss
         
         loss.backward()
         optimizer.step()
@@ -90,31 +95,35 @@ def train(model, train_loader, optimizer, scheduler, threshold=0.5):
 '''EVALUATION'''
 def evaluate_model(model, val_loader, threshold = 0.5):
     model.eval()
-    max_AUC = 0.0
+    all_labels = []
+    all_scores = []
     with torch.no_grad():
         for data in val_loader:
             data = data.to(device)  # Move data to the MPS device
             adj, z, z_g, batch, x_recon, adj_recon_list, _, _, _, _, _ = model(data)  # 모델 예측값
             
-            label_y=[]
-            label_pred = []
-
+            recon_errors = []
             start_node = 0
             for i in range(data.num_graphs): # 각 그래프별로 손실 계산
                 recon_error = 0
                 num_nodes = (data.batch == i).sum().item() # 현재 그래프에 속하는 노드 수
                 end_node = start_node + num_nodes
-
                 graph_num_nodes = end_node - start_node        
+                
                 node_loss = torch.norm(x_recon[start_node:end_node] - data.x[start_node:end_node], p='fro')**2
                 # node_recon_2 = criterion_node(x_recon_prime[start_node:end_node], data.x[start_node:end_node])
                 graph_node_loss = node_loss/graph_num_nodes
                 node_recon_error = graph_node_loss / 30
 
+                # focal_loss_value = focal_loss(adj_recon_list[i], adj[i], gamma=2, alpha=0.25)
+                # # edge_loss = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2
+                # # edge_recon_2 = F.binary_cross_entropy(adj_recon_prime_list[i], adj[i])
+                # graph_edge_loss = focal_loss_value/graph_num_nodes
+                # edge_recon_error = graph_edge_loss * 100
+                
                 edge_loss = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2
-                # edge_recon_2 = F.binary_cross_entropy(adj_recon_prime_list[i], adj[i])
                 graph_edge_loss = edge_loss/graph_num_nodes
-                edge_recon_error = graph_edge_loss / 10
+                edge_recon_error = graph_edge_loss / 30
                 
                 edges = (adj_recon_list[i] > threshold).nonzero(as_tuple=False)
                 edge_index = edges.t()
@@ -126,31 +135,22 @@ def evaluate_model(model, val_loader, threshold = 0.5):
                 graph_z_node_loss = recon_z_node_loss/graph_num_nodes
 
                 recon_z_graph_loss = torch.norm(z_g[i] - z_tilde_g[i], p='fro')**2
-                graph_recon_loss = (graph_z_node_loss / 5) + (recon_z_graph_loss / 5)
+                graph_recon_loss = (graph_z_node_loss / 10) + (recon_z_graph_loss / 10)
             
                 recon_error += node_recon_error + edge_recon_error + graph_recon_loss
-                label_pred.append(recon_error.item())
-                
+                recon_errors.append(recon_error.item())
+
                 start_node = end_node
             
-            label_pred = np.array(label_pred)
-            
-            label_y.extend(data.y.cpu())
-            label_y = np.array(label_y)
-            label_y = label_y.astype(float)
+            all_scores.extend(recon_errors)
+            all_labels.extend(data.y.cpu().numpy())
 
-            ad_auc = roc_auc_score(label_y, label_pred)
-                   
-            fpr_ab, tpr_ab, _ = roc_curve(label_y, label_pred)
-            test_roc_ab = auc(fpr_ab, tpr_ab)   
-            
-            # print('semi-supervised abnormal detection: auroc_ab: {}'.format(test_roc_ab))
-            if test_roc_ab > max_AUC:
-                max_AUC=test_roc_ab
+    all_labels = np.array(all_labels)
+    all_scores = np.array(all_scores)
+    fpr, tpr, _ = roc_curve(all_labels, all_scores)
+    auroc = auc(fpr, tpr)
         
-        auroc_final = max_AUC
-        
-    return auroc_final
+    return auroc
 
 
 #%%
@@ -161,7 +161,7 @@ parser.add_argument("--assets-root", type=str, default="./assets")
 parser.add_argument("--data-root", type=str, default='./dataset/data')
 parser.add_argument("--dataset-name", type=str, default='NCI1')
 parser.add_argument("--hidden-dims", nargs='+', type=int, default=[256, 128])
-parser.add_argument("--test-batch-size", type=int, default=128)
+parser.add_argument("--test-batch-size", type=int, default=9999)
 parser.add_argument("--n-test-anomaly", type=int, default=400)
 parser.add_argument("--batch-size", type=int, default=128)
 parser.add_argument("--random-seed", type=int, default=42)
@@ -325,7 +325,18 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
         for hidden_dim in hidden_dims:
             self.encoder_sub_blocks.append(ResidualBlock(current_dim, hidden_dim))
             current_dim = hidden_dim
-            
+        
+        # 가중치 초기화
+        self.apply(self._init_weights)
+    
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
+            if module.bias is not None:
+                nn.init.constant_(module.bias, 0)
+        elif isinstance(module, nn.BatchNorm1d):
+            nn.init.constant_(module.weight, 1)
+            nn.init.constant_(module.bias, 0)                        
             
     def forward(self, data):
         x, edge_index, batch = data.x, data.edge_index, data.batch
@@ -419,7 +430,7 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
 
 #%%
 '''DATASETS'''
-graph_dataset = TUDataset(root='./dataset', name='COX2').shuffle()
+graph_dataset = TUDataset(root='./dataset', name='BZR').shuffle()
 labels = np.array([data.y.item() for data in graph_dataset])
 
 print(f'Number of graphs: {len(graph_dataset)}')
@@ -437,8 +448,9 @@ hidden_dims=[256, 128]
 
 model = GRAPH_AUTOENCODER(num_features, hidden_dims).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5) # L2 regularization
-scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.5)
-    
+scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.1, patience=10, verbose=True)
+# scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.5)
+
 
 # %%
 '''TRAIN PROCESS'''
@@ -448,12 +460,12 @@ epochs = 100
 for fold, (train_idx, val_idx) in enumerate(skf.split(graph_dataset, labels)):
     print(f"Fold {fold + 1}")
     
-    train_normal_idx = [idx for idx in train_idx if labels[idx] == 1]
+    train_normal_idx = [idx for idx in train_idx if labels[idx] == 0]
     print(len(train_idx))
     print(len(train_normal_idx))
     
-    val_normal_idx = [idx for idx in val_idx if labels[idx] == 1]
-    val_anormal_idx = [idx for idx in val_idx if labels[idx] == 0]
+    val_normal_idx = [idx for idx in val_idx if labels[idx] == 0]
+    val_anormal_idx = [idx for idx in val_idx if labels[idx] == 1]
     print(len(val_normal_idx))
     print(len(val_anormal_idx))
     
@@ -478,15 +490,19 @@ for fold, (train_idx, val_idx) in enumerate(skf.split(graph_dataset, labels)):
     print(f"  Validation set size (normal + abnormal): {len(val_dataset)}")
     
     model = GRAPH_AUTOENCODER(num_features, hidden_dims).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5) # L2 regularization
+    scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.1, patience=10, verbose=True)
     
     for epoch in range(epochs):
         train_loss = train(model, train_loader, optimizer, scheduler)
-        print(f'Epoch {epoch+1}: Training Loss = {train_loss:.4f}')
-
-        auroc_final = evaluate_model(model, val_loader)
-        print(f'Epoch {epoch+1}: Validation AUC = {auroc_final:.4f}')
+        auroc = evaluate_model(model, val_loader)
+        scheduler.step(auroc)  # AUC 기반으로 학습률 조정
+        print(f'Epoch {epoch+1}: Training Loss = {train_loss:.4f}, Validation AUC = {auroc:.4f}')
+        # wandb.log({"epoch": epoch, "train loss": train_loss, "test AUC": auroc})
 
     print("\n")
+    
+# wandb.finish()
 
-# %%
+#%%
+
