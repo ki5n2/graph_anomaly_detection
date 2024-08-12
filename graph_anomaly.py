@@ -220,7 +220,7 @@ os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
 #%%
 '''DATASETS'''
-graph_dataset = TUDataset(root='./dataset', name='NCI1').shuffle()
+?graph_dataset = ?TUDataset(root='./dataset', name='COX2').shuffle()
 labels = np.array([data.y.item() for data in graph_dataset])
 
 print(f'Number of graphs: {len(graph_dataset)}')
@@ -234,23 +234,29 @@ skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 #%%
 visualize(graph_dataset[0])
 visualize(graph_dataset[2])
+visualize(graph_dataset[1])
+visualize(graph_dataset[6])
+
 visualize(graph_dataset[7])
 visualize(graph_dataset[13])
 
-visualize(graph_dataset[1])
-visualize(graph_dataset[6])
-visualize(graph_dataset[11])
+visualize(graph_dataset[3])
 visualize(graph_dataset[12])
 
 graph_dataset[0].y
+graph_dataset[1].y
 graph_dataset[2].y
+graph_dataset[4].y
+graph_dataset[5].y
+graph_dataset[6].y
+graph_dataset[8].y
+graph_dataset[9].y
+graph_dataset[10].y
+
+graph_dataset[3].y
 graph_dataset[7].y
 graph_dataset[13].y
 
-graph_dataset[1].y
-graph_dataset[6].y
-graph_dataset[11].y
-graph_dataset[12].y
 
 
 visualize(graph_dataset2[0])
@@ -491,12 +497,12 @@ epochs = 100
 for fold, (train_idx, val_idx) in enumerate(skf.split(graph_dataset, labels)):
     print(f"Fold {fold + 1}")
     
-    train_normal_idx = [idx for idx in train_idx if labels[idx] == 1]
+    train_normal_idx = [idx for idx in train_idx if labels[idx] == 0]
     print(len(train_idx))
     print(len(train_normal_idx))
     
-    val_normal_idx = [idx for idx in val_idx if labels[idx] == 1]
-    val_anormal_idx = [idx for idx in val_idx if labels[idx] == 0]
+    val_normal_idx = [idx for idx in val_idx if labels[idx] == 0]
+    val_anormal_idx = [idx for idx in val_idx if labels[idx] == 1]
     print(len(val_normal_idx))
     print(len(val_anormal_idx))
     
@@ -531,4 +537,3 @@ for fold, (train_idx, val_idx) in enumerate(skf.split(graph_dataset, labels)):
         print(f'Epoch {epoch+1}: Validation AUC = {auroc_final:.4f}')
 
     print("\n")
-
