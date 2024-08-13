@@ -28,7 +28,8 @@ from sklearn.metrics import auc, roc_curve, roc_auc_score, precision_score, reca
 from module.loss import Triplet_loss, loss_cal, focal_loss
 from module.utils import set_device, add_gaussian_perturbation, randint_exclude, extract_subgraph, batch_nodes_subgraphs, adj_original, adj_recon, visualize
 
-
+gcn=GCNConv(in_channels=38, out_channels=64)
+gcn.state_dict()
 #%%
 '''TRAIN'''
 def train(model, train_loader, optimizer, scheduler, threshold=0.5):
@@ -145,8 +146,8 @@ def evaluate_model(model, val_loader, threshold = 0.5):
             all_scores.extend(recon_errors)
             all_labels.extend(data.y.cpu().numpy())
 
-    all_labels = np.array(all_labels)
     all_scores = np.array(all_scores)
+    all_labels = np.array(all_labels)
     fpr, tpr, _ = roc_curve(all_labels, all_scores)
     auroc = auc(fpr, tpr)
         
@@ -430,7 +431,10 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
 
 #%%
 '''DATASETS'''
-graph_dataset = TUDataset(root='./dataset', name='BZR').shuffle()
+graph_dataset = TUDataset(root='./dataset', name='Tox21_p53_training').shuffle()
+graph_dataset.x.size()
+
+
 labels = np.array([data.y.item() for data in graph_dataset])
 
 print(f'Number of graphs: {len(graph_dataset)}')
@@ -439,6 +443,36 @@ print(f'Number of edge features: {graph_dataset.num_edge_features}')
 print(f'labels: {labels}')
 
 skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+#%%
+visualize(graph_dataset[9])
+visualize(graph_dataset[16])
+
+
+#%%
+graph_dataset = TUDataset(root='./dataset', name='Tox21_p53_training')
+graph_dataset = graph_dataset.shuffle()
+
+print(f'Number of graphs: {len(graph_dataset)}')
+print(f'Number of features: {graph_dataset.num_features}')
+print(f'Number of edge features: {graph_dataset.num_edge_features}')
+
+dataset_normal = [data for data in graph_dataset if data.y.item() == 0]
+dataset_anomaly = [data for data in graph_dataset if data.y.item() == 1]
+
+print(f"Number of normal samples: {len(dataset_normal)}")
+print(f"Number of anomaly samples: {len(dataset_anomaly)}")
+
+train_normal_data, test_normal_data = train_test_split(dataset_normal, test_size=test_size, random_state=random_seed)
+evaluation_data = test_normal_data + dataset_anomaly[:n_test_anomaly]
+
+train_loader = DataLoader(train_normal_data, batch_size=batch_size, shuffle=True)
+test_loader = DataLoader(evaluation_data, batch_size=test_batch_size, shuffle=True)
+
+print(f"Number of samples in the evaluation dataset: {len(evaluation_data)}")
+print(f"Number of test normal data: {len(test_normal_data)}")
+print(f"Number of test anomaly samples: {len(dataset_anomaly[:n_test_anomaly])}")
+print(f"Ratio of test anomaly: {len(dataset_anomaly[:n_test_anomaly]) / len(evaluation_data)}")
 
 
 #%%
@@ -484,7 +518,7 @@ for fold, (train_idx, val_idx) in enumerate(skf.split(graph_dataset, labels)):
             data.y = 1 if data.y == 0 else 0
     
     train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=9999, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=128, shuffle=True)
     
     print(f"  Training set size (normal only): {len(train_dataset)}")
     print(f"  Validation set size (normal + abnormal): {len(val_dataset)}")
