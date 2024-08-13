@@ -28,8 +28,7 @@ from sklearn.metrics import auc, roc_curve, roc_auc_score, precision_score, reca
 from module.loss import Triplet_loss, loss_cal, focal_loss
 from module.utils import set_device, add_gaussian_perturbation, randint_exclude, extract_subgraph, batch_nodes_subgraphs, adj_original, adj_recon, visualize
 
-gcn=GCNConv(in_channels=38, out_channels=64)
-gcn.state_dict()
+
 #%%
 '''TRAIN'''
 def train(model, train_loader, optimizer, scheduler, threshold=0.5):
@@ -96,32 +95,29 @@ def train(model, train_loader, optimizer, scheduler, threshold=0.5):
 '''EVALUATION'''
 def evaluate_model(model, val_loader, threshold = 0.5):
     model.eval()
+    total_loss = 0
     all_labels = []
     all_scores = []
+    
     with torch.no_grad():
         for data in val_loader:
-            data = data.to(device)  # Move data to the MPS device
-            adj, z, z_g, batch, x_recon, adj_recon_list, _, _, _, _, _ = model(data)  # 모델 예측값
+            data = data.to(device)  
+            adj, z, z_g, batch, x_recon, adj_recon_list, pos_sub_z_g, neg_sub_z_g, z_g_mlp, z_prime_g_mlp, target_z = model(data)
             
             recon_errors = []
+            loss = 0
             start_node = 0
-            for i in range(data.num_graphs): # 각 그래프별로 손실 계산
+            
+            for i in range(data.num_graphs): 
                 recon_error = 0
-                num_nodes = (data.batch == i).sum().item() # 현재 그래프에 속하는 노드 수
+                num_nodes = (data.batch == i).sum().item() 
                 end_node = start_node + num_nodes
                 graph_num_nodes = end_node - start_node        
                 
                 node_loss = torch.norm(x_recon[start_node:end_node] - data.x[start_node:end_node], p='fro')**2
-                # node_recon_2 = criterion_node(x_recon_prime[start_node:end_node], data.x[start_node:end_node])
                 graph_node_loss = node_loss/graph_num_nodes
                 node_recon_error = graph_node_loss / 30
 
-                # focal_loss_value = focal_loss(adj_recon_list[i], adj[i], gamma=2, alpha=0.25)
-                # # edge_loss = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2
-                # # edge_recon_2 = F.binary_cross_entropy(adj_recon_prime_list[i], adj[i])
-                # graph_edge_loss = focal_loss_value/graph_num_nodes
-                # edge_recon_error = graph_edge_loss * 100
-                
                 edge_loss = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2
                 graph_edge_loss = edge_loss/graph_num_nodes
                 edge_recon_error = graph_edge_loss / 30
@@ -140,18 +136,25 @@ def evaluate_model(model, val_loader, threshold = 0.5):
             
                 recon_error += node_recon_error + edge_recon_error + graph_recon_loss
                 recon_errors.append(recon_error.item())
+            
+                loss += node_recon_error + edge_recon_error + graph_recon_loss
 
                 start_node = end_node
+            
+            triplet_loss = torch.sum(Triplet_loss(target_z, pos_sub_z_g, neg_sub_z_g)) / 10
+            l2_loss = torch.sum(loss_cal(z_prime_g_mlp, z_g_mlp)) * 3
+            loss += triplet_loss + l2_loss
+            total_loss += loss.item()
             
             all_scores.extend(recon_errors)
             all_labels.extend(data.y.cpu().numpy())
 
-    all_scores = np.array(all_scores)
     all_labels = np.array(all_labels)
+    all_scores = np.array(all_scores)
     fpr, tpr, _ = roc_curve(all_labels, all_scores)
     auroc = auc(fpr, tpr)
         
-    return auroc
+    return auroc, total_loss / len(train_loader)
 
 
 #%%
@@ -162,7 +165,7 @@ parser.add_argument("--assets-root", type=str, default="./assets")
 parser.add_argument("--data-root", type=str, default='./dataset/data')
 parser.add_argument("--dataset-name", type=str, default='NCI1')
 parser.add_argument("--hidden-dims", nargs='+', type=int, default=[256, 128])
-parser.add_argument("--test-batch-size", type=int, default=9999)
+parser.add_argument("--test-batch-size", type=int, default=32)
 parser.add_argument("--n-test-anomaly", type=int, default=400)
 parser.add_argument("--batch-size", type=int, default=128)
 parser.add_argument("--random-seed", type=int, default=42)
@@ -431,9 +434,7 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
 
 #%%
 '''DATASETS'''
-graph_dataset = TUDataset(root='./dataset', name='Tox21_p53_training').shuffle()
-graph_dataset.x.size()
-
+graph_dataset = TUDataset(root='./dataset', name='COX2').shuffle()
 
 labels = np.array([data.y.item() for data in graph_dataset])
 
@@ -443,36 +444,6 @@ print(f'Number of edge features: {graph_dataset.num_edge_features}')
 print(f'labels: {labels}')
 
 skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-
-#%%
-visualize(graph_dataset[9])
-visualize(graph_dataset[16])
-
-
-#%%
-graph_dataset = TUDataset(root='./dataset', name='Tox21_p53_training')
-graph_dataset = graph_dataset.shuffle()
-
-print(f'Number of graphs: {len(graph_dataset)}')
-print(f'Number of features: {graph_dataset.num_features}')
-print(f'Number of edge features: {graph_dataset.num_edge_features}')
-
-dataset_normal = [data for data in graph_dataset if data.y.item() == 0]
-dataset_anomaly = [data for data in graph_dataset if data.y.item() == 1]
-
-print(f"Number of normal samples: {len(dataset_normal)}")
-print(f"Number of anomaly samples: {len(dataset_anomaly)}")
-
-train_normal_data, test_normal_data = train_test_split(dataset_normal, test_size=test_size, random_state=random_seed)
-evaluation_data = test_normal_data + dataset_anomaly[:n_test_anomaly]
-
-train_loader = DataLoader(train_normal_data, batch_size=batch_size, shuffle=True)
-test_loader = DataLoader(evaluation_data, batch_size=test_batch_size, shuffle=True)
-
-print(f"Number of samples in the evaluation dataset: {len(evaluation_data)}")
-print(f"Number of test normal data: {len(test_normal_data)}")
-print(f"Number of test anomaly samples: {len(dataset_anomaly[:n_test_anomaly])}")
-print(f"Ratio of test anomaly: {len(dataset_anomaly[:n_test_anomaly]) / len(evaluation_data)}")
 
 
 #%%
@@ -518,7 +489,7 @@ for fold, (train_idx, val_idx) in enumerate(skf.split(graph_dataset, labels)):
             data.y = 1 if data.y == 0 else 0
     
     train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=128, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=True)
     
     print(f"  Training set size (normal only): {len(train_dataset)}")
     print(f"  Validation set size (normal + abnormal): {len(val_dataset)}")
@@ -529,10 +500,10 @@ for fold, (train_idx, val_idx) in enumerate(skf.split(graph_dataset, labels)):
     
     for epoch in range(epochs):
         train_loss = train(model, train_loader, optimizer, scheduler)
-        auroc = evaluate_model(model, val_loader)
+        auroc, test_loss = evaluate_model(model, val_loader)
         scheduler.step(auroc)  # AUC 기반으로 학습률 조정
-        print(f'Epoch {epoch+1}: Training Loss = {train_loss:.4f}, Validation AUC = {auroc:.4f}')
-        # wandb.log({"epoch": epoch, "train loss": train_loss, "test AUC": auroc})
+        print(f'Epoch {epoch+1}: Training Loss = {train_loss:.4f}, Validation loss = {test_loss:.4f}, Validation AUC = {auroc:.4f}')
+        # wandb.log({"epoch": epoch, "train loss": train_loss, "test loss": test_loss, "test AUC": auroc})
 
     print("\n")
     
