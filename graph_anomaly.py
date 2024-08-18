@@ -31,7 +31,7 @@ from module.utils import set_seed, set_device, add_gaussian_perturbation, randin
 
 #%%
 '''TRAIN'''
-def train(model, train_loader, optimizer, scheduler, threshold=0.5):
+def train(model, train_loader, optimizer, threshold=0.5):
     model.train()
     total_loss = 0
     for data in train_loader:
@@ -49,16 +49,13 @@ def train(model, train_loader, optimizer, scheduler, threshold=0.5):
             
             # node_loss_2 = criterion_node(x_recon_prime[start_node:end_node], data.x[start_node:end_node])
             # node_loss = node_loss_1 / 200
-            
-            edge_loss = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2
-            graph_edge_loss = edge_loss/graph_num_nodes
+
+            adj_loss = F.binary_cross_entropy(adj_recon_list[i], adj[i])
+            graph_edge_loss = adj_loss/graph_num_nodes
             l1_loss = graph_edge_loss / 30
             
             # focal_loss_value = focal_loss(adj_recon_list[i], adj[i], gamma=2, alpha=0.25)
-            # l1_loss = focal_loss_value
             # graph_edge_loss = focal_loss_value/graph_num_nodes
-            # edge_loss_2 = F.binary_cross_entropy(adj_recon_prime_list[i], adj[i])
-            # edge_loss = edge_loss_1 / 100
             
             edges = (adj_recon_list[i] > threshold).nonzero(as_tuple=False)
             edge_index = edges.t()
@@ -86,7 +83,6 @@ def train(model, train_loader, optimizer, scheduler, threshold=0.5):
         optimizer.step()
         total_loss += loss.item()
     
-    scheduler.step()
     return total_loss / len(train_loader)
 
 
@@ -117,8 +113,8 @@ def evaluate_model(model, val_loader, threshold = 0.5):
                 graph_node_loss = node_loss/graph_num_nodes
                 node_recon_error = graph_node_loss / 30
 
-                edge_loss = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2
-                graph_edge_loss = edge_loss/graph_num_nodes
+                adj_loss = F.binary_cross_entropy(adj_recon_list[i], adj[i])
+                graph_edge_loss = adj_loss/graph_num_nodes
                 edge_recon_error = graph_edge_loss / 30
                 
                 edges = (adj_recon_list[i] > threshold).nonzero(as_tuple=False)
@@ -192,7 +188,6 @@ except:
 data_root: str = args.data_root
 assets_root: str = args.assets_root
 dataset_name: str = args.dataset_name
-
 
 epochs: int = args.epochs
 patience: list = args.patience
@@ -303,21 +298,6 @@ class ResidualBlock(nn.Module):
     
 
 #%%
-class Encoder(nn.Module):
-    def __init__(self, num_features, hidden_dims):
-        super(Encoder, self).__init__()
-        self.encoder_blocks = nn.ModuleList()
-        current_dim = num_features
-        for hidden_dim in hidden_dims:
-            self.encoder_blocks.append(ResidualBlock(current_dim, hidden_dim))
-            current_dim = hidden_dim
-
-    def forward(self, x, edge_index):
-        for block in self.encoder_blocks:
-            x = block(x, edge_index)
-        return F.normalize(x, p=2, dim=1)
-
-
 class AdjacencyDecoder(nn.Module):
     def __init__(self, embed_dim):
         super(AdjacencyDecoder, self).__init__()
@@ -328,10 +308,20 @@ class AdjacencyDecoder(nn.Module):
         return torch.sigmoid(torch.matmul(z, z.t()))
 
 
+class AdjacencyDecoder_(nn.Module):
+    def __init__(self, embed_dim):
+        super(AdjacencyDecoder_, self).__init__()
+        self.W = nn.Parameter(torch.Tensor(embed_dim, embed_dim))
+        nn.init.xavier_uniform_(self.W)
+
+    def forward(self, z):
+        return torch.sigmoid(torch.matmul(torch.matmul(z, self.W), z.t()))
+    
+    
 class FeatureDecoder(nn.Module):
-    def __init__(self, embed_dim, hidden_dims, num_features):
+    def __init__(self, embed_dim, hidden_dims, num_features, device=device):
         super(FeatureDecoder, self).__init__()
-        self.decoder_layers = nn.ModuleList()
+        self.decoder_layers = nn.ModuleList().to(device)
         current_dim = embed_dim
         for hidden_dim in reversed(hidden_dims[:-1]):
             self.decoder_layers.append(nn.Linear(current_dim, hidden_dim))
@@ -346,40 +336,79 @@ class FeatureDecoder(nn.Module):
         return z
 
 
+class Feature_Decoder(nn.Module):
+    def __init__(self, embed_dim, hidden_dims, num_features):
+        super(Feature_Decoder, self).__init__()
+        self.layers = nn.ModuleList()
+        dims = [embed_dim] + list(hidden_dims) + [num_features]
+        for i in range(len(dims) - 1):
+            self.layers.append(GCNConv(dims[i], dims[i+1]))
+        
+    def forward(self, z, edge_index):
+        for layer in self.layers[:-1]:
+            z = F.relu(layer(z, edge_index))
+        return self.layers[-1](z, edge_index)
+    
+
+class Adj_Decoder(nn.Module):
+    def __init__(self, embed_dim):
+        super(Adj_Decoder, self).__init__()
+        self.W = nn.Parameter(torch.Tensor(embed_dim, embed_dim))
+        nn.init.xavier_uniform_(self.W)
+
+    def forward(self, z, batch):
+        # z: 노드 임베딩 (N x embed_dim)
+        # batch: 각 노드가 속한 그래프를 나타내는 텐서 (N,)
+        
+        adj_recon_list = []
+        
+        # 가중치 행렬을 적용한 임베딩 계산
+        weighted_z = torch.matmul(z, self.W)
+        
+        for batch_idx in torch.unique(batch):
+            mask = (batch == batch_idx)
+            z_graph = z[mask]
+            weighted_z_graph = weighted_z[mask]
+            
+            # 개선된 인접 행렬 재구성
+            adj_recon_graph = torch.sigmoid(torch.matmul(z_graph, weighted_z_graph.t()))
+            adj_recon_list.append(adj_recon_graph)
+        
+        return adj_recon_list
+
+
 #%%    
 class GRAPH_AUTOENCODER(torch.nn.Module):
     def __init__(self, num_features, hidden_dims):
         super(GRAPH_AUTOENCODER, self).__init__()
-        self.encoder_blocks = torch.nn.ModuleList()
-        self.decoder_blocks = torch.nn.ModuleList()
-        self.encoders_node = torch.nn.ModuleList()
-        self.encoder_sub_blocks = torch.nn.ModuleList()
-        self.act = nn.ReLU()
+        self.encoder_blocks = nn.ModuleList()        
+        self.encoder_node_blocks = nn.ModuleList()        
+        self.encoder_sub_blocks = nn.ModuleList()
+        
+        self.adj_decoder = Adj_Decoder(hidden_dims[-1])       
+        self.feature_decoder = FeatureDecoder(hidden_dims[-1], hidden_dims, num_features)
         self.projection_head = nn.Sequential(
             nn.Linear(hidden_dims[-1], hidden_dims[-1]),
             nn.ReLU(),
             nn.Linear(hidden_dims[-1], hidden_dims[-1])
         )
+        self.act = nn.ReLU()
 
         current_dim = num_features
         for hidden_dim in hidden_dims:
             self.encoder_blocks.append(ResidualBlock(current_dim, hidden_dim))
             current_dim = hidden_dim
         
-        for hidden_dim in reversed(hidden_dims[:-1]):
-            self.decoder_blocks.append(nn.Linear(current_dim, hidden_dim))
-            current_dim = hidden_dim
-        self.decoder_blocks.append(nn.Linear(current_dim, num_features))
-
         current_dim = num_features
         for hidden_dim in hidden_dims:
-            self.encoders_node.append(nn.Linear(current_dim, hidden_dim))
+            self.encoder_node_blocks.append(nn.Linear(current_dim, hidden_dim))
             current_dim = hidden_dim  
         
         current_dim = num_features
         for hidden_dim in hidden_dims:
             self.encoder_sub_blocks.append(ResidualBlock(current_dim, hidden_dim))
             current_dim = hidden_dim
+        
 
         # 가중치 초기화
         self.apply(self._init_weights)
@@ -398,10 +427,11 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
         z_prime = add_gaussian_perturbation(z)
         
         # adjacency matrix reconstruction
-        adj_recon_list, adj_recon_prime_list = adj_recon(z, z_prime, batch)
-        
+        adj_recon_list = self.adj_decoder(z, batch)
+
         # node reconstruction
-        x_recon = self.decode(z)
+        gen_edge_index = mixed_edge_index(edge_index, z)
+        x_recon = self.feature_decoder(z)
         
         # Graph classification
         z_g = global_max_pool(z, batch)  # Aggregate features for classification
@@ -431,23 +461,32 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
         
         return adj, z, z_g, batch, x_recon, adj_recon_list, pos_sub_z_g, neg_sub_z_g, z_g_mlp, z_prime_g_mlp, target_z
     
+    
+    def generate_edge_index(self, z, k=10, device='cuda'):
+        # k-최근접 이웃을 사용하여 새로운 edge_index 생성
+        distances = torch.cdist(z, z)
+        _, indices = distances.topk(k, largest=False)
+        rows = torch.arange(z.size(0), device=device).repeat_interleave(k)
+        cols = indices.view(-1)
+        return torch.stack([rows, cols])
+    
+    def mixed_edge_index(self, original_edge_index, z, alpha=0.5, device='cuda'):
+        new_edge_index = self.generate_edge_index(z, device=device)
+        mask = torch.rand(edge_index.size(1), device=device) < alpha
+        mixed = torch.where(mask, edge_index, new_edge_index)
+        return mixed
+    
     def encode(self, x, edge_index):
         for block in self.encoder_blocks:
             x = block(x, edge_index)
         return F.normalize(x, p=2, dim=1)
-
-    def decode(self, z):
-        x = z
-        for decoder in self.decoder_blocks[:-1]:
-            x = self.act(decoder(x))
-        return torch.sigmoid(self.decoder_blocks[-1](x))
     
     def encode_node(self, x):
-        for encoder in self.encoders_node[:-1]:
+        for encoder in self.encoder_node_blocks[:-1]:
             x = self.act(encoder(x))
             bn_module = nn.BatchNorm1d(x.size()[1]).to('cuda')
             x = bn_module(x)
-        x = self.encoders_node[-1](x)
+        x = self.encoder_node_blocks[-1](x)
         x = F.normalize(x, p=2, dim=1)
         return x
 
@@ -517,12 +556,12 @@ torch.autograd.set_detect_anomaly(True)
 for fold, (train_idx, val_idx) in enumerate(skf.split(graph_dataset, labels)):
     print(f"Fold {fold + 1}")
     
-    train_normal_idx = [idx for idx in train_idx if labels[idx] == 0]
+    train_normal_idx = [idx for idx in train_idx if labels[idx] == 1]
     print(len(train_idx))
     print(len(train_normal_idx))
     
-    val_normal_idx = [idx for idx in val_idx if labels[idx] == 0]
-    val_anormal_idx = [idx for idx in val_idx if labels[idx] == 1]
+    val_normal_idx = [idx for idx in val_idx if labels[idx] == 1]
+    val_anormal_idx = [idx for idx in val_idx if labels[idx] == 0]
     print(len(val_normal_idx))
     print(len(val_anormal_idx))
     
@@ -551,7 +590,7 @@ for fold, (train_idx, val_idx) in enumerate(skf.split(graph_dataset, labels)):
     scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=factor, patience=patience, verbose=True)
     
     for epoch in range(epochs):
-        train_loss = train(model, train_loader, optimizer, scheduler)
+        train_loss = train(model, train_loader, optimizer)
         auroc, test_loss = evaluate_model(model, val_loader)
         scheduler.step(auroc)  # AUC 기반으로 학습률 조정
         print(f'Epoch {epoch+1}: Training Loss = {train_loss:.4f}, Validation loss = {test_loss:.4f}, Validation AUC = {auroc:.4f}')
