@@ -26,7 +26,7 @@ from sklearn.model_selection import train_test_split, KFold, StratifiedKFold
 from sklearn.metrics import auc, roc_curve, roc_auc_score, precision_score, recall_score, f1_score, confusion_matrix
 
 from module.loss import Triplet_loss, loss_cal, focal_loss
-from module.utils import set_device, add_gaussian_perturbation, randint_exclude, extract_subgraph, batch_nodes_subgraphs, adj_original, adj_recon, visualize
+from module.utils import set_seed, set_device, add_gaussian_perturbation, randint_exclude, extract_subgraph, batch_nodes_subgraphs, adj_original, adj_recon, visualize
 
 
 #%%
@@ -38,13 +38,12 @@ def train(model, train_loader, optimizer, scheduler, threshold=0.5):
         data = data.to(device)
         optimizer.zero_grad()
         adj, z, z_g, batch, x_recon, adj_recon_list, pos_sub_z_g, neg_sub_z_g, z_g_mlp, z_prime_g_mlp, target_z = model(data)
-        # adj_list = to_dense_adj(data.edge_index, batch=data.batch)
         
         loss = 0
         start_node = 0
         
-        for i in range(data.num_graphs): # 각 그래프별로 손실 계산
-            num_nodes = (data.batch == i).sum().item() # 현재 그래프에 속하는 노드 수
+        for i in range(data.num_graphs): 
+            num_nodes = (data.batch == i).sum().item() 
             end_node = start_node + num_nodes
             graph_num_nodes = end_node - start_node        
             
@@ -161,20 +160,24 @@ def evaluate_model(model, val_loader, threshold = 0.5):
 '''ARGPARSER'''
 parser = argparse.ArgumentParser()
 
+parser.add_argument("--dataset-name", type=str, default='NCI1')
 parser.add_argument("--assets-root", type=str, default="./assets")
 parser.add_argument("--data-root", type=str, default='./dataset/data')
-parser.add_argument("--dataset-name", type=str, default='NCI1')
-parser.add_argument("--hidden-dims", nargs='+', type=int, default=[256, 128])
-parser.add_argument("--test-batch-size", type=int, default=32)
-parser.add_argument("--n-test-anomaly", type=int, default=400)
+
+parser.add_argument("--epochs", type=int, default=100)
+parser.add_argument("--patience", type=int, default=10)
+parser.add_argument("--n-cross-val", type=int, default=5)
 parser.add_argument("--batch-size", type=int, default=128)
 parser.add_argument("--random-seed", type=int, default=42)
-parser.add_argument("--epochs", type=int, default=100)
-parser.add_argument("--n-cross-val", type=int, default=5)
+parser.add_argument("--test-batch-size", type=int, default=32)
+parser.add_argument("--n-test-anomaly", type=int, default=400)
+parser.add_argument("--hidden-dims", nargs='+', type=int, default=[256, 128])
 
-parser.add_argument("--learning-rate", type=float, default=0.0001)
+parser.add_argument("--factor", type=float, default=0.1)
 parser.add_argument("--test-size", type=float, default=0.25)
-parser.add_argument("--fine-tune", type=bool, default=True)
+parser.add_argument("--weight-decay", type=float, default=1e-5)
+parser.add_argument("--learning-rate", type=float, default=0.0001)
+
 parser.add_argument("--dataset-AN", action="store_false")
 parser.add_argument("--pretrained", action="store_false")
 
@@ -186,25 +189,30 @@ except:
 
 #%%
 '''OPTIONS'''
-assets_root: str = args.assets_root
 data_root: str = args.data_root
+assets_root: str = args.assets_root
 dataset_name: str = args.dataset_name
 
-hidden_dims: list = args.hidden_dims
-test_batch_size: int = args.test_batch_size
-n_test_anomaly: int = args.n_test_anomaly
+
+epochs: int = args.epochs
+patience: list = args.patience
 batch_size: int = args.batch_size
 random_seed: int = args.random_seed
-epochs: int = args.epochs
 n_cross_val: int = args.n_cross_val
+hidden_dims: list = args.hidden_dims
+n_test_anomaly: int = args.n_test_anomaly
+test_batch_size: int = args.test_batch_size
 
-learning_rate: float = args.learning_rate
+factor: float = args.factor
 test_size: float = args.test_size
-fine_tune: bool = args.fine_tune
+weight_decay: float = args.weight_decay
+learning_rate: float = args.learning_rate
+
 dataset_AN: bool = args.dataset_AN
 pretrained: bool = args.pretrained
 
-# device = torch.device('cpu')
+set_seed(random_seed)
+
 device = set_device()
 print(f"Using device: {device}")
 
@@ -293,8 +301,52 @@ class ResidualBlock(nn.Module):
         x = self.bn2(self.conv2(x, edge_index))
         return F.relu(x + residual)
     
-    
-# %%
+
+#%%
+class Encoder(nn.Module):
+    def __init__(self, num_features, hidden_dims):
+        super(Encoder, self).__init__()
+        self.encoder_blocks = nn.ModuleList()
+        current_dim = num_features
+        for hidden_dim in hidden_dims:
+            self.encoder_blocks.append(ResidualBlock(current_dim, hidden_dim))
+            current_dim = hidden_dim
+
+    def forward(self, x, edge_index):
+        for block in self.encoder_blocks:
+            x = block(x, edge_index)
+        return F.normalize(x, p=2, dim=1)
+
+
+class AdjacencyDecoder(nn.Module):
+    def __init__(self, embed_dim):
+        super(AdjacencyDecoder, self).__init__()
+        self.embed_dim = embed_dim
+
+    def forward(self, z):
+        # 내적을 통한 인접 행렬 재구성
+        return torch.sigmoid(torch.matmul(z, z.t()))
+
+
+class FeatureDecoder(nn.Module):
+    def __init__(self, embed_dim, hidden_dims, num_features):
+        super(FeatureDecoder, self).__init__()
+        self.decoder_layers = nn.ModuleList()
+        current_dim = embed_dim
+        for hidden_dim in reversed(hidden_dims[:-1]):
+            self.decoder_layers.append(nn.Linear(current_dim, hidden_dim))
+            self.decoder_layers.append(nn.ReLU())
+            self.decoder_layers.append(nn.BatchNorm1d(hidden_dim))
+            current_dim = hidden_dim
+        self.decoder_layers.append(nn.Linear(current_dim, num_features))
+
+    def forward(self, z):
+        for layer in self.decoder_layers:
+            z = layer(z)
+        return z
+
+
+#%%    
 class GRAPH_AUTOENCODER(torch.nn.Module):
     def __init__(self, num_features, hidden_dims):
         super(GRAPH_AUTOENCODER, self).__init__()
@@ -302,14 +354,13 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
         self.decoder_blocks = torch.nn.ModuleList()
         self.encoders_node = torch.nn.ModuleList()
         self.encoder_sub_blocks = torch.nn.ModuleList()
-        self.classifiers = torch.nn.ModuleList()
         self.act = nn.ReLU()
         self.projection_head = nn.Sequential(
             nn.Linear(hidden_dims[-1], hidden_dims[-1]),
             nn.ReLU(),
             nn.Linear(hidden_dims[-1], hidden_dims[-1])
         )
-        
+
         current_dim = num_features
         for hidden_dim in hidden_dims:
             self.encoder_blocks.append(ResidualBlock(current_dim, hidden_dim))
@@ -329,19 +380,11 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
         for hidden_dim in hidden_dims:
             self.encoder_sub_blocks.append(ResidualBlock(current_dim, hidden_dim))
             current_dim = hidden_dim
-        
+
         # 가중치 초기화
         self.apply(self._init_weights)
     
-    def _init_weights(self, module):
-        if isinstance(module, nn.Linear):
-            nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
-            if module.bias is not None:
-                nn.init.constant_(module.bias, 0)
-        elif isinstance(module, nn.BatchNorm1d):
-            nn.init.constant_(module.weight, 1)
-            nn.init.constant_(module.bias, 0)                        
-            
+                
     def forward(self, data):
         x, edge_index, batch = data.x, data.edge_index, data.batch
 
@@ -416,7 +459,7 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
     def process_subgraphs(self, subgraphs):
         # 각 서브그래프에 대해 인코딩을 실행
         subgraph_embeddings = []
-        for i in range(len(subgraphs)):
+        for i in range(subgraphs.num_graphs):
             subgraph = subgraphs[i]
             x = subgraph.x
             edge_index = subgraph.edge_index
@@ -430,11 +473,21 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
             subgraph_embeddings.append(z)
 
         return subgraph_embeddings, new_edge_index
-
+    
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
+            if module.bias is not None:
+                nn.init.constant_(module.bias, 0)
+        elif isinstance(module, nn.BatchNorm1d):
+            nn.init.constant_(module.weight, 1)
+            nn.init.constant_(module.bias, 0)            
+    
 
 #%%
 '''DATASETS'''
-graph_dataset = TUDataset(root='./dataset', name='COX2').shuffle()
+data_name = 'COX2'
+graph_dataset = TUDataset(root='./dataset', name=data_name).shuffle()
 
 labels = np.array([data.y.item() for data in graph_dataset])
 
@@ -443,7 +496,7 @@ print(f'Number of features: {graph_dataset.num_features}')
 print(f'Number of edge features: {graph_dataset.num_edge_features}')
 print(f'labels: {labels}')
 
-skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+skf = StratifiedKFold(n_splits=n_cross_val, shuffle=True, random_state=random_seed)
 
 
 #%%
@@ -452,8 +505,8 @@ num_features = graph_dataset.num_features
 hidden_dims=[256, 128]
 
 model = GRAPH_AUTOENCODER(num_features, hidden_dims).to(device)
-optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5) # L2 regularization
-scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.1, patience=10, verbose=True)
+optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay) # L2 regularization
+scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=factor, patience=patience, verbose=True)
 # scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.5)
 
 
@@ -461,7 +514,6 @@ scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.1, patience=10, ve
 '''TRAIN PROCESS'''
 torch.autograd.set_detect_anomaly(True)  
 
-epochs = 100
 for fold, (train_idx, val_idx) in enumerate(skf.split(graph_dataset, labels)):
     print(f"Fold {fold + 1}")
     
@@ -488,15 +540,15 @@ for fold, (train_idx, val_idx) in enumerate(skf.split(graph_dataset, labels)):
         for data in val_dataset:
             data.y = 1 if data.y == 0 else 0
     
-    train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=True)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=test_batch_size, shuffle=True)
     
     print(f"  Training set size (normal only): {len(train_dataset)}")
     print(f"  Validation set size (normal + abnormal): {len(val_dataset)}")
     
     model = GRAPH_AUTOENCODER(num_features, hidden_dims).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5) # L2 regularization
-    scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.1, patience=10, verbose=True)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay) # L2 regularization
+    scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=factor, patience=patience, verbose=True)
     
     for epoch in range(epochs):
         train_loss = train(model, train_loader, optimizer, scheduler)
