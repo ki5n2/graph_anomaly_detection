@@ -40,6 +40,8 @@ def train(model, train_loader, optimizer, threshold=0.5):
         adj, z, z_g, batch, x_recon, adj_recon_list, pos_sub_z_g, neg_sub_z_g, z_g_mlp, z_prime_g_mlp, target_z = model(data)
         
         loss = 0
+        loss_ = 0
+        loss__ = 0
         start_node = 0
         
         for i in range(data.num_graphs): 
@@ -51,8 +53,7 @@ def train(model, train_loader, optimizer, threshold=0.5):
             # node_loss = node_loss_1 / 200
 
             adj_loss = F.binary_cross_entropy(adj_recon_list[i], adj[i])
-            graph_edge_loss = adj_loss/graph_num_nodes
-            l1_loss = graph_edge_loss / 30
+            l1_loss = adj_loss
             
             # focal_loss_value = focal_loss(adj_recon_list[i], adj[i], gamma=2, alpha=0.25)
             # graph_edge_loss = focal_loss_value/graph_num_nodes
@@ -69,11 +70,13 @@ def train(model, train_loader, optimizer, threshold=0.5):
             recon_z_graph_loss = torch.norm(z_g[i] - z_tilde_g[i], p='fro')**2
             l3_loss = (graph_z_node_loss / 10) + (recon_z_graph_loss / 10)
             loss += l1_loss + l3_loss
+            loss_ += l1_loss
+            loss__ += l3_loss
             
             start_node = end_node
         
         node_loss = torch.norm(x_recon - data.x, p='fro')**2
-        node_loss = (node_loss/x_recon.size(0))
+        node_loss = (node_loss/x_recon.size(0)) / 20
         
         triplet_loss = torch.sum(Triplet_loss(target_z, pos_sub_z_g, neg_sub_z_g)) / 10
         l2_loss = torch.sum(loss_cal(z_prime_g_mlp, z_g_mlp)) * 3
@@ -111,11 +114,10 @@ def evaluate_model(model, val_loader, threshold = 0.5):
                 
                 node_loss = torch.norm(x_recon[start_node:end_node] - data.x[start_node:end_node], p='fro')**2
                 graph_node_loss = node_loss/graph_num_nodes
-                node_recon_error = graph_node_loss / 30
+                node_recon_error = graph_node_loss / 100
 
                 adj_loss = F.binary_cross_entropy(adj_recon_list[i], adj[i])
-                graph_edge_loss = adj_loss/graph_num_nodes
-                edge_recon_error = graph_edge_loss / 30
+                edge_recon_error = adj_loss / 16
                 
                 edges = (adj_recon_list[i] > threshold).nonzero(as_tuple=False)
                 edge_index = edges.t()
@@ -127,7 +129,7 @@ def evaluate_model(model, val_loader, threshold = 0.5):
                 graph_z_node_loss = recon_z_node_loss/graph_num_nodes
 
                 recon_z_graph_loss = torch.norm(z_g[i] - z_tilde_g[i], p='fro')**2
-                graph_recon_loss = (graph_z_node_loss / 10) + (recon_z_graph_loss / 10)
+                graph_recon_loss = (graph_z_node_loss / 2) + (recon_z_graph_loss / 2)
             
                 recon_error += node_recon_error + edge_recon_error + graph_recon_loss
                 recon_errors.append(recon_error.item())
@@ -430,7 +432,7 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
         adj_recon_list = self.adj_decoder(z, batch)
 
         # node reconstruction
-        gen_edge_index = mixed_edge_index(edge_index, z)
+        # gen_edge_index = mixed_edge_index(edge_index, z)
         x_recon = self.feature_decoder(z)
         
         # Graph classification
@@ -580,7 +582,7 @@ for fold, (train_idx, val_idx) in enumerate(skf.split(graph_dataset, labels)):
             data.y = 1 if data.y == 0 else 0
     
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=test_batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=test_batch_size, shuffle=False)
     
     print(f"  Training set size (normal only): {len(train_dataset)}")
     print(f"  Validation set size (normal + abnormal): {len(val_dataset)}")
@@ -600,5 +602,4 @@ for fold, (train_idx, val_idx) in enumerate(skf.split(graph_dataset, labels)):
     
 # wandb.finish()
 
-#%%
-
+# %%
