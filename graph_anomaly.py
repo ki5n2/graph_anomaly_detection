@@ -52,7 +52,7 @@ def train(model, train_loader, optimizer, threshold=0.5):
             # node_loss = node_loss_1 / 200
 
             adj_loss = F.binary_cross_entropy(adj_recon_list[i], adj[i])
-            l1_loss = adj_loss
+            l1_loss = adj_loss / 2
             
             # focal_loss_value = focal_loss(adj_recon_list[i], adj[i], gamma=2, alpha=0.25)
             # graph_edge_loss = focal_loss_value/graph_num_nodes
@@ -72,11 +72,12 @@ def train(model, train_loader, optimizer, threshold=0.5):
         z_tilde_g = global_max_pool(z_tilde, batch)
         
         recon_z_node_loss = torch.norm(z - z_tilde, p='fro')**2
-        graph_z_node_loss = recon_z_node_loss/z.size(0)
+        graph_z_node_loss = recon_z_node_loss / (z.size(1) * 2)
             
         z_g_dist = torch.pdist(z_g)
         z_tilde_g_dist = torch.pdist(z_tilde_g)
         w_distance = torch.tensor(wasserstein_distance(z_g_dist.detach().cpu().numpy(), z_tilde_g_dist.detach().cpu().numpy()), device='cuda')
+        w_distance = w_distance*50
         
         triplet_loss = torch.sum(Triplet_loss(target_z, pos_sub_z_g, neg_sub_z_g)) / 10
         l2_loss = torch.sum(loss_cal(z_prime_g_mlp, z_g_mlp)) * 3
@@ -506,7 +507,6 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
             x = self.dropout(x)
         return F.normalize(x, p=2, dim=1)
 
-    
     def encode_node(self, x):
         for encoder in self.encoder_node_blocks[:-1]:
             x = self.act(encoder(x))
@@ -622,7 +622,7 @@ for fold, (train_idx, val_idx) in enumerate(skf.split(graph_dataset, labels)):
         train_loss = train(model, train_loader, optimizer)
         auroc, precision, recall, f1, test_loss = evaluate_model(model, val_loader)
         scheduler.step(test_loss)  # AUC 기반으로 학습률 조정
-        early_stopping(auroc, model)
+        early_stopping(test_loss, model)
 
         print(f'Epoch {epoch+1}: Training Loss = {train_loss:.4f}, Validation loss = {test_loss:.4f}, Validation AUC = {auroc:.4f}, Precision = {precision:.4f}, Recall = {recall:.4f}, F1 = {f1:.4f}')
 
