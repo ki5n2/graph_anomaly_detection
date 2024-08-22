@@ -38,7 +38,7 @@ def train(model, train_loader, optimizer, threshold=0.5):
     for data in train_loader:
         data = data.to(device)
         optimizer.zero_grad()
-        adj, z, z_g, batch, x_recon, adj_recon_list, new_edge_index, pos_sub_z_g, neg_sub_z_g, z_g_mlp, z_prime_g_mlp, target_z = model(data)
+        adj, z, z_g, x_recon, adj_recon_list, z_tilde, z_tilde_g, pos_sub_z_g, neg_sub_z_g, z_g_mlp, z_prime_g_mlp, target_z = model(data)
         
         loss = 0
         start_node = 0
@@ -67,17 +67,14 @@ def train(model, train_loader, optimizer, threshold=0.5):
 
         node_loss = torch.norm(x_recon - data.x, p='fro')**2
         node_loss = (node_loss/x_recon.size(0)) / 20
-        
-        z_tilde = model.encode(x_recon, new_edge_index).to('cuda')
-        z_tilde_g = global_max_pool(z_tilde, batch)
-        
+    
         recon_z_node_loss = torch.norm(z - z_tilde, p='fro')**2
         graph_z_node_loss = recon_z_node_loss / (z.size(1) * 2)
-            
+        
         z_g_dist = torch.pdist(z_g)
         z_tilde_g_dist = torch.pdist(z_tilde_g)
         w_distance = torch.tensor(wasserstein_distance(z_g_dist.detach().cpu().numpy(), z_tilde_g_dist.detach().cpu().numpy()), device='cuda')
-        w_distance = w_distance*50
+        w_distance = w_distance * 50
         
         triplet_loss = torch.sum(Triplet_loss(target_z, pos_sub_z_g, neg_sub_z_g)) / 10
         l2_loss = torch.sum(loss_cal(z_prime_g_mlp, z_g_mlp)) * 3
@@ -101,7 +98,7 @@ def evaluate_model(model, val_loader, threshold = 0.5):
     with torch.no_grad():
         for data in val_loader:
             data = data.to(device)  
-            adj, z, z_g, batch, x_recon, adj_recon_list, new_edge_index, pos_sub_z_g, neg_sub_z_g, z_g_mlp, z_prime_g_mlp, target_z = model(data)
+            adj, z, z_g, x_recon, adj_recon_list, z_tilde, z_tilde_g, pos_sub_z_g, neg_sub_z_g, z_g_mlp, z_prime_g_mlp, target_z = model(data)
             
             recon_errors = []
             loss = 0
@@ -122,9 +119,6 @@ def evaluate_model(model, val_loader, threshold = 0.5):
                 
                 # edges = (adj_recon_list[i] > threshold).nonzero(as_tuple=False)
                 # edge_index = edges.t()
-                
-                z_tilde =  model.encode(x_recon, new_edge_index).to('cuda')
-                z_tilde_g = global_max_pool(z_tilde, batch)
                 
                 recon_z_node_loss = torch.norm(z[start_node:end_node] - z_tilde[start_node:end_node], p='fro')**2
                 graph_z_node_loss = recon_z_node_loss/graph_num_nodes
@@ -428,7 +422,6 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
         for hidden_dim in hidden_dims:
             self.encoder_sub_blocks.append(ResidualBlock(current_dim, hidden_dim, dropout_rate))
             current_dim = hidden_dim
-        
 
         # 가중치 초기화
         self.apply(self._init_weights)
@@ -467,6 +460,9 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
         z_g_mlp = self.projection_head(z_g)
         z_prime_g_mlp = self.projection_head(z_prime_g) # (batch_size, embedded size)
         
+        z_tilde = self.encode(x_recon, new_edge_index)
+        z_tilde_g = global_max_pool(z_tilde, batch)
+        
         # subgraph
         batched_pos_subgraphs, batched_neg_subgraphs, batched_target_node_features = batch_nodes_subgraphs(data)
         
@@ -486,7 +482,7 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
         
         target_z = self.encode_node(batched_target_node_features) # (batch_size, feature_size)
         
-        return adj, z, z_g, batch, x_recon, adj_recon_list, new_edge_index, pos_sub_z_g, neg_sub_z_g, z_g_mlp, z_prime_g_mlp, target_z
+        return adj, z, z_g, x_recon, adj_recon_list, z_tilde, z_tilde_g, pos_sub_z_g, neg_sub_z_g, z_g_mlp, z_prime_g_mlp, target_z
     
     
     def get_edge_index_from_adj_list(self, adj_recon_list, batch, threshold=0.5):
@@ -608,7 +604,7 @@ for fold, (train_idx, val_idx) in enumerate(skf.split(graph_dataset, labels)):
             data.y = 1 if data.y == 0 else 0
     
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=test_batch_size, shuffle=False)
+    val_loader = DataLoader(val_dataset, batch_size=test_batch_size, shuffle=True)
     
     print(f"  Training set size (normal only): {len(train_dataset)}")
     print(f"  Validation set size (normal + abnormal): {len(val_dataset)}")
