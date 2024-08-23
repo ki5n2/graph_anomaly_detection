@@ -38,8 +38,7 @@ def train(model, train_loader, optimizer):
     for data in train_loader:
         data = data.to(device)
         optimizer.zero_grad()
-        adj, z, z_g, x_recon, adj_recon_list, z_tilde, z_tilde_g, pos_sub_z_g, neg_sub_z_g, z_g_mlp, z_prime_g_mlp, target_z = model(data)
-        
+        adj, z, z_g, x_recon, adj_recon_list, z_tilde, z_tilde_g, aug_z_g = model(data)
         loss = 0
         start_node = 0
         
@@ -76,11 +75,11 @@ def train(model, train_loader, optimizer):
         w_distance = torch.tensor(wasserstein_distance(z_g_dist.detach().cpu().numpy(), z_tilde_g_dist.detach().cpu().numpy()), device='cuda')
         w_distance = w_distance * 50
         
-        info_nce_loss_value = info_nce_loss(z_g, data.y)
+        info_nce_loss_value = info_nce_loss(z_g, aug_z_g)
 
         # triplet_loss = torch.sum(Triplet_loss(target_z, pos_sub_z_g, neg_sub_z_g)) / 10
-        l2_loss = torch.sum(loss_cal(z_prime_g_mlp, z_g_mlp)) * 3
-        loss += node_loss + graph_z_node_loss + w_distance + info_nce_loss_value + l2_loss
+        # l2_loss = torch.sum(loss_cal(z_prime_g_mlp, z_g_mlp)) * 3
+        loss += node_loss + graph_z_node_loss + w_distance + info_nce_loss_value
         
         loss.backward()
         optimizer.step()
@@ -100,7 +99,7 @@ def evaluate_model(model, val_loader):
     with torch.no_grad():
         for data in val_loader:
             data = data.to(device)  
-            adj, z, z_g, x_recon, adj_recon_list, z_tilde, z_tilde_g, pos_sub_z_g, neg_sub_z_g, z_g_mlp, z_prime_g_mlp, target_z = model(data)
+            adj, z, z_g, x_recon, adj_recon_list, z_tilde, z_tilde_g, aug_z_g = model(data)
             
             recon_errors = []
             loss = 0
@@ -135,9 +134,9 @@ def evaluate_model(model, val_loader):
 
                 start_node = end_node
             
-            triplet_loss = torch.sum(Triplet_loss(target_z, pos_sub_z_g, neg_sub_z_g)) / 10
-            l2_loss = torch.sum(loss_cal(z_prime_g_mlp, z_g_mlp)) * 3
-            loss += triplet_loss + l2_loss
+            # triplet_loss = torch.sum(Triplet_loss(target_z, pos_sub_z_g, neg_sub_z_g)) / 10
+            # l2_loss = torch.sum(loss_cal(z_prime_g_mlp, z_g_mlp)) * 3
+            # loss += triplet_loss + l2_loss
             total_loss += loss.item()
             
             all_scores.extend(recon_errors)
@@ -431,7 +430,15 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
                 
     def forward(self, data):
         x, edge_index, batch = data.x, data.edge_index, data.batch
-
+        
+        aug_data = self.conservative_augment_molecular_graph(data)
+        aug_x, aug_edge_index, aug_batch = aug_data.x, aug_data.edge_index, aug_data.batch
+            
+        # latent vector
+        aug_z = self.encode(aug_x, aug_edge_index)
+        aug_z = self.dropout(aug_z)
+        aug_z_g = global_max_pool(aug_z, aug_batch)  # Aggregate features for classification
+        
         # adjacency matrix
         adj = adj_original(edge_index, batch)
             
@@ -484,7 +491,7 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
         
         target_z = self.encode_node(batched_target_node_features) # (batch_size, feature_size)
         
-        return adj, z, z_g, x_recon, adj_recon_list, z_tilde, z_tilde_g, pos_sub_z_g, neg_sub_z_g, z_g_mlp, z_prime_g_mlp, target_z
+        return adj, z, z_g, x_recon, adj_recon_list, z_tilde, z_tilde_g, aug_z_g
     
     
     def get_edge_index_from_adj_list(self, adj_recon_list, batch, threshold=0.5):
@@ -538,6 +545,27 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
 
         return subgraph_embeddings, new_edge_index
     
+    def conservative_augment_molecular_graph(self, graph, node_attr_noise_std=0.01, edge_mask_prob=0.03):
+        augmented_graph = graph.clone()
+        
+        # 1. 노드 특성에 미세한 가우시안 노이즈 추가
+        if graph.x is not None:
+            noise = torch.randn_like(graph.x) * node_attr_noise_std
+            augmented_graph.x = graph.x + noise
+        
+        # 2. 매우 낮은 확률로 일부 엣지 마스킹 (완전히 제거하지 않음)
+        if random.random() < edge_mask_prob:
+            edge_index = augmented_graph.edge_index
+            num_edges = edge_index.size(1)
+            mask = torch.rand(num_edges) > 0.1  # 10%의 엣지만 마스킹
+            masked_edge_index = edge_index[:, mask]
+            
+            # 마스킹된 엣지의 정보를 별도로 저장
+            augmented_graph.masked_edges = edge_index[:, ~mask]
+            augmented_graph.edge_index = masked_edge_index
+        
+        return augmented_graph
+
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
             nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
@@ -550,7 +578,7 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
 
 #%%
 '''DATASETS'''
-data_name = 'COX2'
+data_name = 'AIDS'
 graph_dataset = TUDataset(root='./dataset', name=data_name).shuffle()
 
 labels = np.array([data.y.item() for data in graph_dataset])
