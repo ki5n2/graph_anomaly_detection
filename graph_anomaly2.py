@@ -161,7 +161,7 @@ def evaluate_model(model, val_loader):
 '''ARGPARSER'''
 parser = argparse.ArgumentParser()
 
-parser.add_argument("--dataset-name", type=str, default='NCI1')
+parser.add_argument("--dataset-name", type=str, default='AIDS')
 parser.add_argument("--assets-root", type=str, default="./assets")
 parser.add_argument("--data-root", type=str, default='./dataset/data')
 
@@ -578,8 +578,7 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
 
 #%%
 '''DATASETS'''
-data_name = 'AIDS'
-graph_dataset = TUDataset(root='./dataset', name=data_name).shuffle()
+graph_dataset = TUDataset(root='./dataset', name=dataset_name).shuffle()
 
 labels = np.array([data.y.item() for data in graph_dataset])
 
