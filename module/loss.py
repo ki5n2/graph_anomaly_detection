@@ -66,3 +66,18 @@ def info_nce_loss(z1, z2, temperature=0.07):
     labels = torch.zeros(N, device=z1.device).long()
     logits = torch.cat([positive_samples, negative_samples[:N, :N-1]], dim=1)
     return F.cross_entropy(logits, labels)
+
+
+def loss_func(adj, A_hat, attrs, X_hat):
+    # Attribute reconstruction loss
+    diff_attribute = torch.pow(X_hat - attrs, 2)
+    attribute_reconstruction_errors = torch.sqrt(torch.sum(diff_attribute, 1))
+    attribute_cost = torch.mean(attribute_reconstruction_errors)
+
+    # structure reconstruction loss
+    diff_structure = torch.pow(A_hat - adj, 2)
+    structure_reconstruction_errors = torch.sqrt(torch.sum(diff_structure, 1))
+    structure_cost = torch.mean(structure_reconstruction_errors)
+
+
+    return structure_cost, attribute_cost
