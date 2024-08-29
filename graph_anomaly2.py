@@ -24,10 +24,13 @@ from torch_geometric.utils import add_self_loops, k_hop_subgraph, to_dense_adj, 
 
 from scipy.stats import wasserstein_distance
 from sklearn.model_selection import train_test_split, KFold, StratifiedKFold
-from sklearn.metrics import auc, roc_curve, roc_auc_score, precision_score, recall_score, f1_score, confusion_matrix
+from sklearn.metrics import auc, roc_curve, roc_auc_score, precision_score, recall_score, f1_score, confusion_matrix, precision_recall_curve
 
 from module.loss import Triplet_loss, loss_cal, info_nce_loss, focal_loss
-from module.utils import set_seed, set_device, add_gaussian_perturbation, randint_exclude, extract_subgraph, batch_nodes_subgraphs, adj_original, adj_recon, visualize, EarlyStopping
+from util import set_seed, set_device, add_gaussian_perturbation, randint_exclude, extract_subgraph, batch_nodes_subgraphs, adj_original, adj_recon, visualize, EarlyStopping
+
+from load_data import *
+from GraphBuild import *
 
 
 #%%
@@ -39,47 +42,66 @@ def train(model, train_loader, optimizer):
         data = data.to(device)
         optimizer.zero_grad()
         adj, z, z_g, x_recon, adj_recon_list, z_tilde, z_tilde_g, aug_z_g = model(data)
+        
+        print(len(adj))
+        print(len(adj_recon_list))
+        print(adj[0].shape)
+        print(adj_recon_list[0].shape)
+        print(adj[0])
+        print(adj_recon_list[0])
+
         loss = 0
+        loss1 = 0
+        loss2 = 0
         start_node = 0
         
         for i in range(data.num_graphs): 
             num_nodes = (data.batch == i).sum().item() 
             end_node = start_node + num_nodes
-            graph_num_nodes = end_node - start_node        
+            # graph_num_nodes = end_node - start_node        
             
             # node_loss_2 = criterion_node(x_recon_prime[start_node:end_node], data.x[start_node:end_node])
             # node_loss = node_loss_1 / 200
 
             adj_loss = F.binary_cross_entropy(adj_recon_list[i], adj[i])
             l1_loss = adj_loss / 2
+            loss += l1_loss 
             
-            # focal_loss_value = focal_loss(adj_recon_list[i], adj[i], gamma=2, alpha=0.25)
-            # graph_edge_loss = focal_loss_value/graph_num_nodes
+            z_dist = torch.pdist(z[start_node:end_node])
+            z_tilde_dist = torch.pdist(z_tilde[start_node:end_node])
+            w_distance = torch.tensor(wasserstein_distance(z_dist.detach().cpu().numpy(), z_tilde_dist.detach().cpu().numpy()), device='cpu') /2
+            loss2 += w_distance
             
+            loss += l1_loss + w_distance
             # edges = (adj_recon_list[i] > threshold).nonzero(as_tuple=False)
             # edge_index = edges.t()
     
             # recon_z_graph_loss = torch.norm(z_g[i] - z_tilde_g[i], p='fro')**2
-            loss += l1_loss 
             
             start_node = end_node
 
+        print(f'Train adj_loss : {loss1}')
+        print(f'Train w_distance : {loss2}')
+        
         node_loss = torch.norm(x_recon - data.x, p='fro')**2
         node_loss = (node_loss/x_recon.size(0)) / 20
     
-        recon_z_node_loss = torch.norm(z - z_tilde, p='fro')**2
-        graph_z_node_loss = recon_z_node_loss / (z.size(1) * 2)
+        # recon_z_node_loss = torch.norm(z - z_tilde, p='fro')**2
+        # graph_z_node_loss = recon_z_node_loss / (z.size(1) * 2)
         
-        z_g_dist = torch.pdist(z_g)
-        z_tilde_g_dist = torch.pdist(z_tilde_g)
-        w_distance = torch.tensor(wasserstein_distance(z_g_dist.detach().cpu().numpy(), z_tilde_g_dist.detach().cpu().numpy()), device='cuda')
-        w_distance = w_distance * 50
+        # z_g_dist = torch.pdist(z_g)
+        # z_tilde_g_dist = torch.pdist(z_tilde_g)
+        # w_distance = torch.tensor(wasserstein_distance(z_g_dist.detach().cpu().numpy(), z_tilde_g_dist.detach().cpu().numpy()), device='cuda')
+        # w_distance = w_distance * 50
         
-        info_nce_loss_value = info_nce_loss(z_g, aug_z_g)
+        info_nce_loss_value = info_nce_loss(z_g, aug_z_g) * 4
 
+        print(f'Train node loss: {node_loss}')
+        print(f'Train info_nce_loss :{info_nce_loss_value}')
+        
         # triplet_loss = torch.sum(Triplet_loss(target_z, pos_sub_z_g, neg_sub_z_g)) / 10
         # l2_loss = torch.sum(loss_cal(z_prime_g_mlp, z_g_mlp)) * 3
-        loss += node_loss + graph_z_node_loss + w_distance + info_nce_loss_value
+        loss += node_loss + w_distance + info_nce_loss_value
         
         loss.backward()
         optimizer.step()
@@ -113,24 +135,43 @@ def evaluate_model(model, val_loader):
                 
                 node_loss = torch.norm(x_recon[start_node:end_node] - data.x[start_node:end_node], p='fro')**2
                 graph_node_loss = node_loss/graph_num_nodes
-                node_recon_error = graph_node_loss / 100
+                node_recon_error = graph_node_loss / 2
 
                 adj_loss = F.binary_cross_entropy(adj_recon_list[i], adj[i])
-                edge_recon_error = adj_loss / 16
+                edge_recon_error = adj_loss / 100
                 
                 # edges = (adj_recon_list[i] > threshold).nonzero(as_tuple=False)
                 # edge_index = edges.t()
                 
-                recon_z_node_loss = torch.norm(z[start_node:end_node] - z_tilde[start_node:end_node], p='fro')**2
-                graph_z_node_loss = recon_z_node_loss/graph_num_nodes
+                # recon_z_node_loss = torch.norm(z[start_node:end_node] - z_tilde[start_node:end_node], p='fro')**2
+                # graph_z_node_loss = recon_z_node_loss/graph_num_nodes
 
-                recon_z_graph_loss = torch.norm(z_g[i] - z_tilde_g[i], p='fro')**2
-                graph_recon_loss = (graph_z_node_loss / 2) + (recon_z_graph_loss / 2)
-            
-                recon_error += node_recon_error + edge_recon_error + graph_recon_loss
+                # recon_z_graph_loss = torch.norm(z_g[i] - z_tilde_g[i], p='fro')**2
+                # graph_recon_loss = (graph_z_node_loss / 2) + (recon_z_graph_loss / 2)
+
+                z_dist = torch.pdist(z[start_node:end_node])
+                z_tilde_dist = torch.pdist(z_tilde[start_node:end_node])
+                w_distance = torch.tensor(wasserstein_distance(z_dist.detach().cpu().numpy(), z_tilde_dist.detach().cpu().numpy()), device='cpu') 
+                
+                print(f'node_recon_error: {node_recon_error}')
+                print(f'edge_recon_error: {edge_recon_error}')
+                # print(f'graph_recon_loss: {graph_recon_loss}')
+                print(f'w_distance: {w_distance}')
+                
+                recon_error += node_recon_error + edge_recon_error + w_distance
                 recon_errors.append(recon_error.item())
-            
-                loss += node_recon_error + edge_recon_error + graph_recon_loss
+
+                # test loss
+                l1_loss = F.binary_cross_entropy(adj_recon_list[i], adj[i]) / 20
+                
+                recon_z_node_loss_ = torch.norm(z[start_node:end_node] - z_tilde[start_node:end_node], p='fro')**2
+                graph_z_node_loss_ = recon_z_node_loss_/graph_num_nodes
+                
+                recon_z_graph_loss_ = torch.norm(z_g[i] - z_tilde_g[i], p='fro')**2
+                l3_loss = (graph_z_node_loss_/2) + (recon_z_graph_loss_/2)
+                
+                if data[i].y.item() == 0:
+                    loss += l1_loss + l3_loss + node_recon_error + w_distance
 
                 start_node = end_node
             
@@ -145,33 +186,41 @@ def evaluate_model(model, val_loader):
     all_labels = np.array(all_labels)
     all_scores = np.array(all_scores)
     fpr, tpr, thresholds = roc_curve(all_labels, all_scores)
-    optimal_idx = np.argmax(tpr - fpr)
-    optimal_threshold = thresholds[optimal_idx]
     auroc = auc(fpr, tpr)
     
+    optimal_idx = np.argmax(tpr - fpr)
+    optimal_threshold = thresholds[optimal_idx]
+    precision, recall, _ = precision_recall_curve(all_labels, all_scores)
+    auprc = auc(recall, precision)
+
+    if auroc > max_AUC:
+        max_AUC=auroc
+
+    # 추가된 평가 지표
     pred_labels = (all_scores > optimal_threshold).astype(int)
     precision = precision_score(all_labels, pred_labels)
     recall = recall_score(all_labels, pred_labels)
     f1 = f1_score(all_labels, pred_labels)
     
-    return auroc, precision, recall, f1, total_loss / len(val_loader)
+    return auroc, auprc, precision, recall, f1, max_AUC, total_loss / len(val_loader)
 
 
 #%%
 '''ARGPARSER'''
 parser = argparse.ArgumentParser()
 
-parser.add_argument("--dataset-name", type=str, default='AIDS')
+parser.add_argument("--dataset-name", type=str, default='COX2')
 parser.add_argument("--assets-root", type=str, default="./assets")
-parser.add_argument("--data-root", type=str, default='./dataset/data')
+parser.add_argument("--data-root", type=str, default='./dataset')
 
 parser.add_argument("--epochs", type=int, default=100)
 parser.add_argument("--patience", type=int, default=10)
 parser.add_argument("--n-cross-val", type=int, default=5)
-parser.add_argument("--batch-size", type=int, default=128)
+parser.add_argument("--batch-size", type=int, default=300)
 parser.add_argument("--random-seed", type=int, default=42)
-parser.add_argument("--test-batch-size", type=int, default=9999)
+parser.add_argument("--test-batch-size", type=int, default=128)
 parser.add_argument("--n-test-anomaly", type=int, default=400)
+
 parser.add_argument("--hidden-dims", nargs='+', type=int, default=[256, 128])
 
 parser.add_argument("--factor", type=float, default=0.1)
@@ -181,6 +230,8 @@ parser.add_argument("--learning-rate", type=float, default=0.0001)
 
 parser.add_argument("--dataset-AN", action="store_false")
 parser.add_argument("--pretrained", action="store_false")
+
+parser.add_argument('--max-nodes', type=int, default=0)
 
 try:
     args = parser.parse_args()
@@ -210,6 +261,8 @@ learning_rate: float = args.learning_rate
 
 dataset_AN: bool = args.dataset_AN
 pretrained: bool = args.pretrained
+
+max_nodes: int = args.max_nodes
 
 set_seed(random_seed)
 
@@ -274,9 +327,9 @@ class ResidualBlock(nn.Module):
     def __init__(self, in_channels, out_channels, dropout_rate):
         super(ResidualBlock, self).__init__()
         self.conv1 = GCNConv(in_channels, out_channels)
-        self.conv2 = GCNConv(out_channels, out_channels)
+        # self.conv2 = GCNConv(out_channels, out_channels)
         self.bn1 = nn.BatchNorm1d(out_channels)
-        self.bn2 = nn.BatchNorm1d(out_channels)
+        # self.bn2 = nn.BatchNorm1d(out_channels)
         self.dropout = nn.Dropout(dropout_rate)
         
         if in_channels != out_channels:
@@ -288,8 +341,8 @@ class ResidualBlock(nn.Module):
         residual = self.shortcut(x)
         x = F.relu(self.bn1(self.conv1(x, edge_index)))
         x = self.dropout(x)
-        x = self.bn2(self.conv2(x, edge_index))
-        x = self.dropout(x)
+        # x = self.bn2(self.conv2(x, edge_index))
+        # x = self.dropout(x)
         return F.relu(x + residual)
 
 
@@ -386,7 +439,8 @@ class BilinearEdgeDecoder(nn.Module):
         adj = torch.sigmoid(torch.mm(torch.mm(z, self.weight), z.t()))
         return adj
     
-    
+# model.encoder_blocks[1].conv1.state_dict()
+
 #%%    
 class GRAPH_AUTOENCODER(torch.nn.Module):
     def __init__(self, num_features, hidden_dims, dropout_rate=0.1):
@@ -463,7 +517,7 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
         x_recon = self.feature_decoder(z)
 
         # Graph classification
-        z_g = global_max_pool(z, batch)  # Aggregate features for classification
+        z_g = global_max_pool(z, batch) # Aggregate features for classification
         z_prime_g = global_max_pool(z_prime, batch) # (batch_size, embedded size)
         
         z_g_mlp = self.projection_head(z_g)
@@ -574,11 +628,25 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
         elif isinstance(module, nn.BatchNorm1d):
             nn.init.constant_(module.weight, 1)
             nn.init.constant_(module.bias, 0)            
-                
+   
 
 #%%
 '''DATASETS'''
 graph_dataset = TUDataset(root='./dataset', name=dataset_name).shuffle()
+
+prefix = os.path.join(data_root, dataset_name, 'raw', dataset_name)
+filename_node_attrs=prefix + '_node_attributes.txt'
+node_attrs=[]
+try:
+    with open(filename_node_attrs) as f:
+        for line in f:
+            line = line.strip("\s\n")
+            attrs = [float(attr) for attr in re.split("[,\s]+", line) if not attr == '']
+            node_attrs.append(np.array(attrs))
+except IOError:
+    print('No node attributes')
+node_attrs = np.array(node_attrs)
+graph_dataset.x = torch.tensor(node_attrs, dtype=torch.float)
 
 labels = np.array([data.y.item() for data in graph_dataset])
 
@@ -592,16 +660,14 @@ skf = StratifiedKFold(n_splits=n_cross_val, shuffle=True, random_state=random_se
 
 #%%
 '''MODEL AND OPTIMIZER DEFINE'''
-num_features = graph_dataset.num_features
-hidden_dims=[256, 128]
-
+num_features = graph_dataset.x.size()[1]
 model = GRAPH_AUTOENCODER(num_features, hidden_dims, dropout_rate=0.1).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay) # L2 regularization
 scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=factor, patience=patience, verbose=True)
 # scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.5)
 early_stopping = EarlyStopping(patience=30, verbose=True)
 
-
+        
 # %%
 '''TRAIN PROCESS'''
 torch.autograd.set_detect_anomaly(True)  
@@ -645,11 +711,11 @@ for fold, (train_idx, val_idx) in enumerate(skf.split(graph_dataset, labels)):
     
     for epoch in range(epochs):
         train_loss = train(model, train_loader, optimizer)
-        auroc, precision, recall, f1, test_loss = evaluate_model(model, val_loader)
+        auroc, auprc, precision, recall, f1, test_loss = evaluate_model(model, val_loader)
         scheduler.step(test_loss)  # AUC 기반으로 학습률 조정
         early_stopping(test_loss, model)
 
-        print(f'Epoch {epoch+1}: Training Loss = {train_loss:.4f}, Validation loss = {test_loss:.4f}, Validation AUC = {auroc:.4f}, Precision = {precision:.4f}, Recall = {recall:.4f}, F1 = {f1:.4f}')
+        print(f'Epoch {epoch+1}: Training Loss = {train_loss:.4f}, Validation loss = {test_loss:.4f}, Validation AUC = {auroc:.4f}, Validation AUC = {aurpc:.4f}, Precision = {precision:.4f}, Recall = {recall:.4f}, F1 = {f1:.4f}')
 
     if early_stopping.early_stop:
         print("Early stopping")
