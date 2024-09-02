@@ -121,8 +121,38 @@ def batch_nodes_subgraphs(data):
     # return batched_target_nodes, batched_initial_nodes, batched_pos_subgraphs, batched_neg_subgraphs, batched_target_node_features
     return batched_pos_subgraphs, batched_neg_subgraphs, batched_target_node_features
     
+
+def adj_original(edge_index, batch, max_nodes):
+    adj_matrices = []
+    # 가장 큰 그래프의 노드 수 찾기
     
-def adj_original(edge_index, batch):
+    for batch_idx in torch.unique(batch):
+        # 현재 그래프에 속하는 노드들의 마스크
+        mask = (batch == batch_idx)
+        # 현재 그래프의 에지 인덱스 추출
+        sub_edge_index = edge_index[:, mask[edge_index[0]] & mask[edge_index[1]]]
+        
+        # 노드 인덱스를 0부터 시작하도록 재매핑
+        _, sub_edge_index = torch.unique(sub_edge_index, return_inverse=True)
+        sub_edge_index = sub_edge_index.reshape(2, -1)
+        
+        # 현재 그래프의 노드 수
+        num_nodes = sum(mask).item()
+        
+        # 인접 행렬 생성 (현재 그래프 크기로)
+        adj_matrix = to_dense_adj(sub_edge_index, max_num_nodes=num_nodes)[0]
+        
+        # 최대 크기에 맞춰 패딩
+        padded_adj_matrix = torch.zeros(max_nodes, max_nodes)
+        padded_adj_matrix[:num_nodes, :num_nodes] = adj_matrix
+        padded_adj_matrix = padded_adj_matrix.to('cuda')
+        
+        adj_matrices.append(padded_adj_matrix)
+    
+    return adj_matrices
+
+
+def adj_original_(edge_index, batch):
     adj_matrices = []
     for batch_idx in torch.unique(batch):
         # 현재 그래프에 속하는 노드들의 마스크

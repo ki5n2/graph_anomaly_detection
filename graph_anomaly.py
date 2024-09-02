@@ -1,7 +1,6 @@
 #%%
 '''IMPORTS'''
 import os
-import wandb
 import torch
 import random
 import argparse
@@ -27,14 +26,14 @@ from sklearn.model_selection import train_test_split, KFold, StratifiedKFold
 from sklearn.metrics import auc, roc_curve, roc_auc_score, precision_score, recall_score, f1_score, confusion_matrix
 
 from module.loss import Triplet_loss, loss_cal, info_nce_loss, focal_loss
-from module.utils import set_seed, set_device, add_gaussian_perturbation, randint_exclude, extract_subgraph, batch_nodes_subgraphs, adj_original, adj_recon, visualize, EarlyStopping
+from util import set_seed, set_device, add_gaussian_perturbation, randint_exclude, extract_subgraph, batch_nodes_subgraphs, adj_original, adj_recon, visualize, EarlyStopping
 
 
 #%%
 '''TRAIN'''
 def train(model, train_loader, optimizer):
     model.train()
-    total_loss = 0
+    total_loss = 0 
     for data in train_loader:
         data = data.to(device)
         optimizer.zero_grad()
@@ -76,11 +75,11 @@ def train(model, train_loader, optimizer):
         w_distance = torch.tensor(wasserstein_distance(z_g_dist.detach().cpu().numpy(), z_tilde_g_dist.detach().cpu().numpy()), device='cuda')
         w_distance = w_distance * 50
         
-        info_nce_loss_value = info_nce_loss(z_g, data.y)
+        # info_nce_loss_value = info_nce_loss(z_g, data.y)
 
-        # triplet_loss = torch.sum(Triplet_loss(target_z, pos_sub_z_g, neg_sub_z_g)) / 10
+        triplet_loss = torch.sum(Triplet_loss(target_z, pos_sub_z_g, neg_sub_z_g)) / 10
         l2_loss = torch.sum(loss_cal(z_prime_g_mlp, z_g_mlp)) * 3
-        loss += node_loss + graph_z_node_loss + w_distance + info_nce_loss_value + l2_loss
+        loss += node_loss + graph_z_node_loss + w_distance + triplet_loss + l2_loss
         
         loss.backward()
         optimizer.step()
@@ -375,28 +374,40 @@ class Adj_Decoder(nn.Module):
 
 
 class BilinearEdgeDecoder(nn.Module):
-    def __init__(self, input_dim):
+    def __init__(self, input_dim, max_nodes, threshold=0.5):
         super(BilinearEdgeDecoder, self).__init__()
         self.weight = nn.Parameter(torch.Tensor(input_dim, input_dim))
+        self.threshold = threshold
+        self.max_nodes = max_nodes
         self.reset_parameters()
-    
+
     def reset_parameters(self):
         nn.init.xavier_uniform_(self.weight)
-    
+
     def forward(self, z):
+        # z의 실제 노드 수
+        actual_nodes = z.size(0)
+        
+        # 원래 크기의 인접 행렬 생성
         adj = torch.sigmoid(torch.mm(torch.mm(z, self.weight), z.t()))
-        return adj
+        adj_binary = (adj > self.threshold).float()
+        
+        # 최대 크기에 맞춰 패딩
+        padded_adj = torch.zeros(self.max_nodes, self.max_nodes, device=z.device) # , device=z.device
+        padded_adj[:actual_nodes, :actual_nodes] = adj_binary
+        
+        return padded_adj
     
     
 #%%    
 class GRAPH_AUTOENCODER(torch.nn.Module):
-    def __init__(self, num_features, hidden_dims, dropout_rate=0.1):
+    def __init__(self, num_features, hidden_dims, max_nodes, dropout_rate=0.1):
         super(GRAPH_AUTOENCODER, self).__init__()
         self.encoder_blocks = nn.ModuleList()        
         self.encoder_node_blocks = nn.ModuleList()        
         self.encoder_sub_blocks = nn.ModuleList()
         
-        self.edge_decoder = BilinearEdgeDecoder(hidden_dims[-1])
+        self.edge_decoder = BilinearEdgeDecoder(hidden_dims[-1], max_nodes)
         self.feature_decoder = Feature_Decoder(hidden_dims[-1], hidden_dims, num_features)
         self.projection_head = nn.Sequential(
             nn.Linear(hidden_dims[-1], hidden_dims[-1]),
@@ -405,7 +416,8 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
         )
         self.act = nn.ReLU()
         self.dropout = nn.Dropout(dropout_rate)
-
+        self.max_nodes = max_nodes
+        
         current_dim = num_features
         for hidden_dim in hidden_dims:
             self.encoder_blocks.append(ResidualBlock(current_dim, hidden_dim, dropout_rate))
@@ -433,8 +445,8 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
         x, edge_index, batch = data.x, data.edge_index, data.batch
 
         # adjacency matrix
-        adj = adj_original(edge_index, batch)
-            
+        adj = adj_original(edge_index, batch, self.max_nodes)
+        
         # latent vector
         z = self.encode(x, edge_index)
         z = self.dropout(z)
@@ -450,7 +462,7 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
             adj_recon = self.edge_decoder(z_graph)
             adj_recon_list.append(adj_recon)
 
-        new_edge_index = self.get_edge_index_from_adj_list(adj_recon_list, batch)
+        new_edge_index = self.get_edge_index_from_adj_list(adj_recon_list, batch).to(device)
         
         # node reconstruction
         x_recon = self.feature_decoder(z)
@@ -566,9 +578,10 @@ skf = StratifiedKFold(n_splits=n_cross_val, shuffle=True, random_state=random_se
 #%%
 '''MODEL AND OPTIMIZER DEFINE'''
 num_features = graph_dataset.num_features
+max_nodes = max([graph_dataset[i].num_nodes for i in range(len(graph_dataset))])  # 데이터셋에서 최대 노드 수 계산
 hidden_dims=[256, 128]
 
-model = GRAPH_AUTOENCODER(num_features, hidden_dims, dropout_rate=0.1).to(device)
+model = GRAPH_AUTOENCODER(num_features, hidden_dims, max_nodes, dropout_rate=0.1).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay) # L2 regularization
 scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=factor, patience=patience, verbose=True)
 # scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.5)
@@ -606,12 +619,12 @@ for fold, (train_idx, val_idx) in enumerate(skf.split(graph_dataset, labels)):
             data.y = 1 if data.y == 0 else 0
     
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=test_batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=True)
     
     print(f"  Training set size (normal only): {len(train_dataset)}")
     print(f"  Validation set size (normal + abnormal): {len(val_dataset)}")
     
-    model = GRAPH_AUTOENCODER(num_features, hidden_dims, dropout_rate=0.1).to(device)
+    model = GRAPH_AUTOENCODER(num_features, hidden_dims, max_nodes, dropout_rate=0.1).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay) # L2 regularization
     scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=factor, patience=patience, verbose=True)
     early_stopping = EarlyStopping(patience=30, verbose=True)

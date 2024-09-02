@@ -1,6 +1,7 @@
 #%%
 '''IMPORTS'''
 import os
+import copy
 import wandb
 import torch
 import random
@@ -41,7 +42,11 @@ def train(model, train_loader, optimizer):
     for data in train_loader:
         data = data.to(device)
         optimizer.zero_grad()
-        adj, z, z_g, x_recon, adj_recon_list, z_tilde, z_tilde_g, aug_z_g = model(data)
+        adj, z, z_g, batch, x_recon, adj_recon_list, z_tilde, z_tilde_g, aug_z_g = model(data)
+        
+        z_g_mean = global_mean_pool(z, batch)
+        z_g_train = z_g.mean(dim=0, keepdim=True)
+        z_g_mean_train = z_g_mean.mean(dim=0, keepdim=True)
         
         print(len(adj))
         print(len(adj_recon_list))
@@ -65,7 +70,7 @@ def train(model, train_loader, optimizer):
 
             adj_loss = F.binary_cross_entropy(adj_recon_list[i], adj[i])
             l1_loss = adj_loss / 2
-            loss += l1_loss 
+            loss1 += l1_loss 
             
             z_dist = torch.pdist(z[start_node:end_node])
             z_tilde_dist = torch.pdist(z_tilde[start_node:end_node])
@@ -107,28 +112,35 @@ def train(model, train_loader, optimizer):
         optimizer.step()
         total_loss += loss.item()
     
-    return total_loss / len(train_loader)
+    return total_loss / len(train_loader), z_g_train, z_g_mean_train
 
 
 #%%
 '''EVALUATION'''
-def evaluate_model(model, val_loader):
+def evaluate_model(model, val_loader, z_g_train, z_g_mean_train):
     model.eval()
     total_loss = 0
+    max_AUC=0
+    
     all_labels = []
     all_scores = []
     
     with torch.no_grad():
         for data in val_loader:
             data = data.to(device)  
-            adj, z, z_g, x_recon, adj_recon_list, z_tilde, z_tilde_g, aug_z_g = model(data)
+            adj, z, z_g, batch, x_recon, adj_recon_list, z_tilde, z_tilde_g, aug_z_g = model(data)
+            
+            z_g_test = z_g
+            z_g_mean_test = global_mean_pool(z, batch)
             
             recon_errors = []
+            recon_errors_ = []
             loss = 0
             start_node = 0
             
             for i in range(data.num_graphs): 
                 recon_error = 0
+                recon_error_ = 0
                 num_nodes = (data.batch == i).sum().item() 
                 end_node = start_node + num_nodes
                 graph_num_nodes = end_node - start_node        
@@ -153,10 +165,10 @@ def evaluate_model(model, val_loader):
                 z_tilde_dist = torch.pdist(z_tilde[start_node:end_node])
                 w_distance = torch.tensor(wasserstein_distance(z_dist.detach().cpu().numpy(), z_tilde_dist.detach().cpu().numpy()), device='cpu') 
                 
-                print(f'node_recon_error: {node_recon_error}')
-                print(f'edge_recon_error: {edge_recon_error}')
-                # print(f'graph_recon_loss: {graph_recon_loss}')
-                print(f'w_distance: {w_distance}')
+                # print(f'node_recon_error: {node_recon_error}')
+                # print(f'edge_recon_error: {edge_recon_error}')
+                # # print(f'graph_recon_loss: {graph_recon_loss}')
+                # print(f'w_distance: {w_distance}')
                 
                 recon_error += node_recon_error + edge_recon_error + w_distance
                 recon_errors.append(recon_error.item())
@@ -164,23 +176,27 @@ def evaluate_model(model, val_loader):
                 # test loss
                 l1_loss = F.binary_cross_entropy(adj_recon_list[i], adj[i]) / 20
                 
-                recon_z_node_loss_ = torch.norm(z[start_node:end_node] - z_tilde[start_node:end_node], p='fro')**2
-                graph_z_node_loss_ = recon_z_node_loss_/graph_num_nodes
+                # recon_z_node_loss_ = torch.norm(z[start_node:end_node] - z_tilde[start_node:end_node], p='fro')**2
+                # graph_z_node_loss_ = recon_z_node_loss_/graph_num_nodes
                 
-                recon_z_graph_loss_ = torch.norm(z_g[i] - z_tilde_g[i], p='fro')**2
-                l3_loss = (graph_z_node_loss_/2) + (recon_z_graph_loss_/2)
+                # recon_z_graph_loss_ = torch.norm(z_g[i] - z_tilde_g[i], p='fro')**2
+                # l3_loss = (graph_z_node_loss_/2) + (recon_z_graph_loss_/2)
                 
                 if data[i].y.item() == 0:
-                    loss += l1_loss + l3_loss + node_recon_error + w_distance
+                    loss += l1_loss + node_recon_error + w_distance
 
+                max_ = torch.norm(z_g_train - z_g_test[i], p='fro')**2
+                mean_ = torch.norm(z_g_mean_train - z_g_mean_test[i], p='fro')**2
+                recon_error_ = max_ + mean_
+                recon_errors_.append(recon_error_.item())
                 start_node = end_node
-            
+            print(recon_errors_)
             # triplet_loss = torch.sum(Triplet_loss(target_z, pos_sub_z_g, neg_sub_z_g)) / 10
             # l2_loss = torch.sum(loss_cal(z_prime_g_mlp, z_g_mlp)) * 3
             # loss += triplet_loss + l2_loss
             total_loss += loss.item()
             
-            all_scores.extend(recon_errors)
+            all_scores.extend(recon_errors_)
             all_labels.extend(data.y.cpu().numpy())
 
     all_labels = np.array(all_labels)
@@ -427,29 +443,41 @@ class Adj_Decoder(nn.Module):
 
 
 class BilinearEdgeDecoder(nn.Module):
-    def __init__(self, input_dim):
+    def __init__(self, input_dim, max_nodes, threshold=0.5):
         super(BilinearEdgeDecoder, self).__init__()
         self.weight = nn.Parameter(torch.Tensor(input_dim, input_dim))
+        self.threshold = threshold
+        self.max_nodes = max_nodes
         self.reset_parameters()
-    
+
     def reset_parameters(self):
         nn.init.xavier_uniform_(self.weight)
-    
+
     def forward(self, z):
+        # z의 실제 노드 수
+        actual_nodes = z.size(0)
+        
+        # 원래 크기의 인접 행렬 생성
         adj = torch.sigmoid(torch.mm(torch.mm(z, self.weight), z.t()))
-        return adj
+        adj_binary = (adj > self.threshold).float()
+        
+        # 최대 크기에 맞춰 패딩
+        padded_adj = torch.zeros(self.max_nodes, self.max_nodes, device=z.device)
+        padded_adj[:actual_nodes, :actual_nodes] = adj_binary
+        
+        return padded_adj
     
 # model.encoder_blocks[1].conv1.state_dict()
 
 #%%    
 class GRAPH_AUTOENCODER(torch.nn.Module):
-    def __init__(self, num_features, hidden_dims, dropout_rate=0.1):
+    def __init__(self, num_features, hidden_dims, max_nodes, dropout_rate=0.1):
         super(GRAPH_AUTOENCODER, self).__init__()
         self.encoder_blocks = nn.ModuleList()        
         self.encoder_node_blocks = nn.ModuleList()        
         self.encoder_sub_blocks = nn.ModuleList()
         
-        self.edge_decoder = BilinearEdgeDecoder(hidden_dims[-1])
+        self.edge_decoder = BilinearEdgeDecoder(hidden_dims[-1], max_nodes, threshold=0.5)
         self.feature_decoder = Feature_Decoder(hidden_dims[-1], hidden_dims, num_features)
         self.projection_head = nn.Sequential(
             nn.Linear(hidden_dims[-1], hidden_dims[-1]),
@@ -494,7 +522,7 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
         aug_z_g = global_max_pool(aug_z, aug_batch)  # Aggregate features for classification
         
         # adjacency matrix
-        adj = adj_original(edge_index, batch)
+        adj = adj_original(edge_index, batch, max_nodes)
             
         # latent vector
         z = self.encode(x, edge_index)
@@ -526,26 +554,26 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
         z_tilde = self.encode(x_recon, new_edge_index)
         z_tilde_g = global_max_pool(z_tilde, batch)
         
-        # subgraph
-        batched_pos_subgraphs, batched_neg_subgraphs, batched_target_node_features = batch_nodes_subgraphs(data)
+        # # subgraph
+        # batched_pos_subgraphs, batched_neg_subgraphs, batched_target_node_features = batch_nodes_subgraphs(data)
         
-        pos_x, pos_edge_index, pos_batch = batched_pos_subgraphs.x, batched_pos_subgraphs.edge_index, batched_pos_subgraphs.batch
-        pos_sub_z, pos_new_edge_index = self.process_subgraphs(batched_pos_subgraphs)
-        pos_sub_z = torch.cat(pos_sub_z) # (number of nodes, embedded size)
+        # pos_x, pos_edge_index, pos_batch = batched_pos_subgraphs.x, batched_pos_subgraphs.edge_index, batched_pos_subgraphs.batch
+        # pos_sub_z, pos_new_edge_index = self.process_subgraphs(batched_pos_subgraphs)
+        # pos_sub_z = torch.cat(pos_sub_z) # (number of nodes, embedded size)
         
-        unique_pos_batch, new_pos_batch = torch.unique(pos_batch, return_inverse=True)
-        pos_sub_z_g = global_mean_pool(pos_sub_z, new_pos_batch)
+        # unique_pos_batch, new_pos_batch = torch.unique(pos_batch, return_inverse=True)
+        # pos_sub_z_g = global_mean_pool(pos_sub_z, new_pos_batch)
         
-        neg_x, neg_edge_index, neg_batch = batched_neg_subgraphs.x, batched_neg_subgraphs.edge_index, batched_neg_subgraphs.batch
-        neg_sub_z, neg_new_edge_index = self.process_subgraphs(batched_neg_subgraphs)
-        neg_sub_z = torch.cat(neg_sub_z)
+        # neg_x, neg_edge_index, neg_batch = batched_neg_subgraphs.x, batched_neg_subgraphs.edge_index, batched_neg_subgraphs.batch
+        # neg_sub_z, neg_new_edge_index = self.process_subgraphs(batched_neg_subgraphs)
+        # neg_sub_z = torch.cat(neg_sub_z)
         
-        unique_neg_batch, new_neg_batch = torch.unique(neg_batch, return_inverse=True)
-        neg_sub_z_g = global_mean_pool(neg_sub_z, new_neg_batch)
+        # unique_neg_batch, new_neg_batch = torch.unique(neg_batch, return_inverse=True)
+        # neg_sub_z_g = global_mean_pool(neg_sub_z, new_neg_batch)
         
-        target_z = self.encode_node(batched_target_node_features) # (batch_size, feature_size)
+        # target_z = self.encode_node(batched_target_node_features) # (batch_size, feature_size)
         
-        return adj, z, z_g, x_recon, adj_recon_list, z_tilde, z_tilde_g, aug_z_g
+        return adj, z, z_g, batch, x_recon, adj_recon_list, z_tilde, z_tilde_g, aug_z_g
     
     
     def get_edge_index_from_adj_list(self, adj_recon_list, batch, threshold=0.5):
@@ -632,11 +660,12 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
 
 #%%
 '''DATASETS'''
-graph_dataset = TUDataset(root='./dataset', name=dataset_name).shuffle()
+graph_dataset_[0].x[0] = TUDataset(root='./dataset', name=dataset_name)
 
 prefix = os.path.join(data_root, dataset_name, 'raw', dataset_name)
 filename_node_attrs=prefix + '_node_attributes.txt'
 node_attrs=[]
+    
 try:
     with open(filename_node_attrs) as f:
         for line in f:
@@ -645,23 +674,37 @@ try:
             node_attrs.append(np.array(attrs))
 except IOError:
     print('No node attributes')
+    
 node_attrs = np.array(node_attrs)
-graph_dataset.x = torch.tensor(node_attrs, dtype=torch.float)
 
+graph_dataset = []
+node_idx = 0
+for i in range(len(graph_dataset_)):
+    old_data = graph_dataset_[i]
+    num_nodes = old_data.num_nodes
+    new_x = torch.tensor(node_attrs[node_idx:node_idx+num_nodes], dtype=torch.float)
+    new_data = Data(x=new_x, edge_index=old_data.edge_index, y=old_data.y)
+    graph_dataset.append(new_data)
+    node_idx += num_nodes
+
+print(graph_dataset[0].x)  # 새 데이터셋의 첫 번째 그래프 x 확인
+        
 labels = np.array([data.y.item() for data in graph_dataset])
 
 print(f'Number of graphs: {len(graph_dataset)}')
-print(f'Number of features: {graph_dataset.num_features}')
-print(f'Number of edge features: {graph_dataset.num_edge_features}')
+print(f'Number of features: {graph_dataset[0].x.shape[1]}')
 print(f'labels: {labels}')
+print(f'Number of edge features: {graph_dataset_.num_edge_features}')
 
 skf = StratifiedKFold(n_splits=n_cross_val, shuffle=True, random_state=random_seed)
 
 
 #%%
 '''MODEL AND OPTIMIZER DEFINE'''
-num_features = graph_dataset.x.size()[1]
-model = GRAPH_AUTOENCODER(num_features, hidden_dims, dropout_rate=0.1).to(device)
+num_features = graph_dataset[0].x.size()[1]
+max_nodes = max([graph_dataset[i].num_nodes for i in range(len(graph_dataset))])  # 데이터셋에서 최대 노드 수 계산
+
+model = GRAPH_AUTOENCODER(num_features, hidden_dims, max_nodes, dropout_rate=0.1).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay) # L2 regularization
 scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=factor, patience=patience, verbose=True)
 # scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.5)
@@ -675,12 +718,12 @@ torch.autograd.set_detect_anomaly(True)
 for fold, (train_idx, val_idx) in enumerate(skf.split(graph_dataset, labels)):
     print(f"Fold {fold + 1}")
     
-    train_normal_idx = [idx for idx in train_idx if labels[idx] == 1]
+    train_normal_idx = [idx for idx in train_idx if labels[idx] == 0]
     print(len(train_idx))
     print(len(train_normal_idx))
     
-    val_normal_idx = [idx for idx in val_idx if labels[idx] == 1]
-    val_anormal_idx = [idx for idx in val_idx if labels[idx] == 0]
+    val_normal_idx = [idx for idx in val_idx if labels[idx] == 0]
+    val_anormal_idx = [idx for idx in val_idx if labels[idx] == 1]
     print(len(val_normal_idx))
     print(len(val_anormal_idx))
     
@@ -704,14 +747,14 @@ for fold, (train_idx, val_idx) in enumerate(skf.split(graph_dataset, labels)):
     print(f"  Training set size (normal only): {len(train_dataset)}")
     print(f"  Validation set size (normal + abnormal): {len(val_dataset)}")
     
-    model = GRAPH_AUTOENCODER(num_features, hidden_dims, dropout_rate=0.1).to(device)
+    model = GRAPH_AUTOENCODER(num_features, hidden_dims, max_nodes, dropout_rate=0.1).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay) # L2 regularization
     scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=factor, patience=patience, verbose=True)
     early_stopping = EarlyStopping(patience=30, verbose=True)
     
     for epoch in range(epochs):
-        train_loss = train(model, train_loader, optimizer)
-        auroc, auprc, precision, recall, f1, test_loss = evaluate_model(model, val_loader)
+        train_loss, z_g_train, z_g_mean_train = train(model, train_loader, optimizer)
+        auroc, auprc, precision, recall, f1, test_loss = evaluate_model(model, val_loader, z_g_train, z_g_mean_train)
         scheduler.step(test_loss)  # AUC 기반으로 학습률 조정
         early_stopping(test_loss, model)
 
