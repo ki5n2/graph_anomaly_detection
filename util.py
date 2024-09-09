@@ -1,8 +1,16 @@
+import re
+import os
 import torch
 import random
 import numpy as np
+import os.path as osp
 
 from torch_geometric.data import Batch
+from torch_geometric.loader import DataLoader
+from torch_geometric.datasets import TUDataset
+from torch_geometric.transforms import Constant
+from torch_geometric.data import Data, DataLoader
+from sklearn.model_selection import StratifiedKFold
 from torch_geometric.utils import to_dense_adj, to_undirected, to_networkx
 
 
@@ -25,20 +33,6 @@ def set_device():
         device = "cpu"
 
     return device
-
-
-def add_gaussian_perturbation(z, epsilon=0.1):
-    """
-    Add Gaussian perturbations to the encoder output z to create z'
-    :param z: torch.Tensor, the output of the encoder
-    :param epsilon: float, the standard deviation of the Gaussian noise to add
-    :return: torch.Tensor, the perturbed output z'
-    """
-    # Gaussian noise generation
-    noise = torch.randn_like(z) * epsilon
-    z_prime = z + noise
-        
-    return z_prime
 
 
 def randint_exclude(data, start_node, end_node):
@@ -152,23 +146,6 @@ def adj_original(edge_index, batch, max_nodes):
     return adj_matrices
 
 
-def adj_original_(edge_index, batch):
-    adj_matrices = []
-    for batch_idx in torch.unique(batch):
-        # 현재 그래프에 속하는 노드들의 마스크
-        mask = (batch == batch_idx)
-        # 현재 그래프의 에지 인덱스 추출
-        sub_edge_index = edge_index[:, mask[edge_index[0]] & mask[edge_index[1]]]
-        # 노드 인덱스를 0부터 시작하도록 재매핑
-        _, sub_edge_index = torch.unique(sub_edge_index, return_inverse=True)
-        sub_edge_index = sub_edge_index.reshape(2, -1)
-        # 인접 행렬 생성
-        adj_matrix = to_dense_adj(sub_edge_index, max_num_nodes=sum(mask).item())[0]
-        adj_matrices.append(adj_matrix)
-        
-    return adj_matrices
-    
-    
 def adj_recon(z, z_prime, batch):
     adj_recon_list = []
     adj_recon_prime_list = []
@@ -231,69 +208,88 @@ class EarlyStopping:
         self.val_loss_min = val_loss
 
 
-# GLADC
-import community
-import matplotlib.pyplot as plt
-import networkx as nx
-import numpy as np
-import scipy.sparse as sp
-import torch
-from packaging import version
+#%%
+'''SIGNET'''
+def get_ad_split_TU(dataset_name, n_cross_val, random_seed):
+    path = osp.join(osp.dirname(osp.realpath(__file__)), 'dataset')
+    dataset = TUDataset(path, name=dataset_name)
+    data_list = []
+    label_list = []
+
+    for data in dataset:
+        data_list.append(data)
+        label_list.append(data.y.item())
+
+    kfd = StratifiedKFold(n_splits=n_cross_val, random_state=random_seed, shuffle=True)
+
+    splits = []
+    for k, (train_index, test_index) in enumerate(kfd.split(data_list, label_list)):
+        splits.append((train_index, test_index))
+
+    return splits
 
 
-def node_iter(G):
-    if version.parse(nx.__version__) < version.parse("2.0"):
-        return G.nodes()  # For NetworkX versions < 2.0
-    else:
-        return G.nodes()  # For NetworkX versions >= 2.0
+def get_data_loaders_TU(dataset_name, batch_size, test_batch_size, split):
+    path = osp.join(osp.dirname(osp.realpath(__file__)), 'dataset')
+    dataset_ = TUDataset(path, name=dataset_name)
+        
+    prefix = os.path.join(path, dataset_name, 'raw', dataset_name)
+    filename_node_attrs=prefix + '_node_attributes.txt'
+    node_attrs=[]
 
-def node_dict(G):
-    if version.parse(nx.__version__) >= version.parse("2.1"):
-        return G.nodes   # For NetworkX versions >= 2.1
-    else:
-        return G.node     # For older versions
+    try:
+        with open(filename_node_attrs) as f:
+            for line in f:
+                line = line.strip("\s\n")
+                attrs = [float(attr) for attr in re.split("[,\s]+", line) if not attr == '']
+                node_attrs.append(np.array(attrs))
+    except IOError:
+        print('No node attributes')
+        
+    node_attrs = np.array(node_attrs)
+
+    dataset = []
+    node_idx = 0
+    for i in range(len(dataset_)):
+        old_data = dataset_[i]
+        num_nodes = old_data.num_nodes
+        new_x = torch.tensor(node_attrs[node_idx:node_idx+num_nodes], dtype=torch.float)
+        new_data = Data(x=new_x, edge_index=old_data.edge_index, y=old_data.y)
+        dataset.append(new_data)
+        node_idx += num_nodes
+
+    dataset_num_features = dataset[0].x.shape[1]
+    # print(dataset[0].x)  # 새 데이터셋의 첫 번째 그래프 x 확인
     
+    data_list = []
+    label_list = []
 
-def adj_process(adjs):
-    g_num, n_num, n_num = adjs.shape
-    adjs = adjs.detach()
-    for i in range(g_num):
-        adjs[i] += torch.eye(n_num).cuda()
-        adjs[i][adjs[i]>0.] = 1.
-        degree_matrix = torch.sum(adjs[i], dim=-1, keepdim=False)
-        degree_matrix = torch.pow(degree_matrix,-1)
-        degree_matrix[degree_matrix == float("inf")] = 0.
-        degree_matrix = torch.diag(degree_matrix)
-        adjs[i] = torch.mm(degree_matrix, adjs[i])
-    return adjs
+    for data in dataset:
+        data_list.append(data)
+        label_list.append(data.y.item())
 
+    (train_index, test_index) = split
+    data_train_ = [data_list[i] for i in train_index]
+    data_test = [data_list[i] for i in test_index]
 
-def NormData(adj):
-    adj=adj.tolist()
-    adj_norm = normalize_adj(adj )
-    adj_norm = adj_norm.toarray()
-    #adj = adj + sp.eye(adj.shape[0])
-    #adj = adj.toarray()
-    #feat = feat.toarray()
-    return adj_norm
+    data_train = []
+    for data in data_train_:
+        if data.y != 0:
+            data_train.append(data)
 
+    idx = 0
+    for data in data_train:
+        data.y = 0
+        data['idx'] = idx
+        idx += 1
 
+    for data in data_test:
+        data.y = 1 if data.y == 0 else 0
 
-def normalize_adj(adj):
-    """Symmetrically normalize adjacency matrix."""
-    adj = sp.coo_matrix(adj)
-    rowsum = np.array(adj.sum(1))
-    d_inv_sqrt = np.power(rowsum, -0.5).flatten()
-    d_inv_sqrt[np.isinf(d_inv_sqrt)] = 0.
-    d_mat_inv_sqrt = sp.diags(d_inv_sqrt)
-    return adj.dot(d_mat_inv_sqrt).transpose().dot(d_mat_inv_sqrt).tocoo()
+    max_nodes = max([dataset[i].num_nodes for i in range(len(dataset))])
+    dataloader = DataLoader(data_train, batch_size, shuffle=True)
+    dataloader_test = DataLoader(data_test, batch_size, shuffle=True)
+    meta = {'num_feat':dataset_num_features, 'num_train':len(data_train), 'num_test':len(data_test), 'num_edge_feat':0, 'max_nodes':max_nodes}
+    loader_dict = {'train': dataloader, 'test': dataloader_test}
 
-
-def preprocess_graph(adj):
-    adj = sp.coo_matrix(adj)
-    adj_ = adj + sp.eye(adj.shape[0])
-    rowsum = np.array(adj_.sum(1))
-    degree_mat_inv_sqrt = sp.diags(np.power(rowsum, -0.5).flatten())
-    adj_normalized = adj_.dot(degree_mat_inv_sqrt).transpose().dot(degree_mat_inv_sqrt).tocoo()
-    return sparse_to_tuple(adj_normalized)
-
+    return loader_dict, meta

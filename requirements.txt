@@ -4,4 +4,5 @@ matplotlib
 scikit-learn
 torch
 torch_geometric
+community
 wandb
