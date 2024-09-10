@@ -30,7 +30,7 @@ from util import set_seed, set_device, EarlyStopping, get_ad_split_TU, get_data_
         
 #%%
 '''TARIN'''
-def train(model, train_loader, optimizer, device):
+def train(model, noise_model_encoder, train_loader, optimizer, device):
     model.train()
     total_loss = 0
     for data in train_loader:
@@ -43,6 +43,9 @@ def train(model, train_loader, optimizer, device):
         print(adj_recon_list[0].shape)
         print(adj[0])
         print(adj_recon_list[0])
+        
+        z, z_g = model.encoder(h0, adj)
+        z_hat, z_hat_g = gen_ran_output(h0, adj, model.encoder, noise_model_encoder)
 
         loss = 0
         start_node = 0
@@ -446,23 +449,23 @@ class GRAPH_AUTOENCODER(torch.nn.Module):
     def forward(self, data):
         x, edge_index, batch = data.x, data.edge_index, data.batch
 
-        aug_data = self.conservative_augment_molecular_graph(data)
-        aug_x, aug_edge_index, aug_batch = aug_data.x, aug_data.edge_index, aug_data.batch
+        # aug_data = self.conservative_augment_molecular_graph(data)
+        # aug_x, aug_edge_index, aug_batch = aug_data.x, aug_data.edge_index, aug_data.batch
         
-        # latent vector
-        aug_z = self.encode(aug_x, aug_edge_index)
-        aug_z = self.dropout(aug_z)
-        aug_z_g = global_max_pool(aug_z, aug_batch)  # Aggregate features for classification
+        # # latent vector
+        # aug_z = self.encode(aug_x, aug_edge_index)
+        # aug_z = self.dropout(aug_z)
+        # aug_z_g = global_max_pool(aug_z, aug_batch)  # Aggregate features for classification
         
         # adjacency matrix
-        adj = adj_original(edge_index, batch, self.max_nodes)
+        # adj = adj_original(edge_index, batch, self.max_nodes)
         
         # latent vector
-        z = self.encode(x, edge_index)
-        z = self.dropout(z)
+        # z = self.encode(x, edge_index)
+        # z = self.dropout(z)
         
         # perturbation
-        z_prime = add_gaussian_perturbation(z)
+        # z_prime = add_gaussian_perturbation(z)
         
         # adjacency matrix reconstruction
         adj_recon_list = []
