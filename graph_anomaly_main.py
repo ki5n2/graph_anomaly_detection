@@ -75,8 +75,8 @@ def train(model, train_loader, optimizer, max_nodes, device):
             num_nodes = (data.batch == i).sum().item() 
             end_node = start_node + num_nodes
             # graph_num_nodes = end_node - start_node        
-            
-            adj_loss = F.binary_cross_entropy(adj_recon_list[i], adj[i])
+            i=10
+            adj_loss = F.binary_cross_entropy(adj_recon_list[i][0][:2], adj[i][0][:2])
             l1_loss = adj_loss / 400
             
             z_dist = torch.pdist(z[start_node:end_node])
@@ -344,7 +344,8 @@ class BilinearEdgeDecoder(nn.Module):
     def forward(self, z):
         actual_nodes = z.size(0)
         adj = torch.sigmoid(torch.mm(torch.mm(z, self.weight), z.t()))
-        adj_binary = (adj > self.threshold).float()
+        adj = adj * (1 - torch.eye(actual_nodes, device=z.device))
+        # adj_binary = (adj > self.threshold).float()
         padded_adj = F.pad(adj_binary, (0, self.max_nodes - actual_nodes, 0, self.max_nodes - actual_nodes))
         return padded_adj
     
