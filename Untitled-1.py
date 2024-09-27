@@ -158,7 +158,7 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
 '''ARGPARSER'''
 parser = argparse.ArgumentParser()
 
-parser.add_argument("--dataset-name", type=str, default='AIDS')
+parser.add_argument("--dataset-name", type=str, default='COX2')
 parser.add_argument("--assets-root", type=str, default="./assets")
 parser.add_argument("--data-root", type=str, default='./dataset')
 
@@ -517,7 +517,6 @@ def run(dataset_name, random_seed, split=None, device=device):
             info_test = 'AD_AUC:{:.4f}, AD_AUPRC:{:.4f}, Test_Loss:{:.4f}, Test_Loss_Anomaly:{:.4f}'.format(auroc, auprc, test_loss, test_loss_anomaly)
 
             print(info_train + '   ' + info_test)
-    
 
     return auroc
 
@@ -565,8 +564,10 @@ class TransformerDecoder(nn.Module):
     def forward(self, tgt, memory):
         return self.transformer_decoder(tgt, memory)
 
+
+#%%
 class GRAPH_AUTOENCODER(nn.Module):
-    def __init__(self, num_features, hidden_dims, dropout_rate=0.1, noise_std=0.1):
+    def __init__(self, num_features, hidden_dims, max_nodes, dropout_rate=0.1, noise_std=0.1):
         super(GRAPH_AUTOENCODER, self).__init__()
         self.encoder = Encoder(num_features, hidden_dims, dropout_rate)
         self.transformer_decoder = TransformerDecoder(
@@ -576,7 +577,7 @@ class GRAPH_AUTOENCODER(nn.Module):
             dim_feedforward=hidden_dims[-1] * 4
         )
         self.node_decoder = nn.Linear(hidden_dims[-1], num_features)
-        self.edge_decoder = nn.Linear(hidden_dims[-1], hidden_dims[-1])
+        self.edge_decoder = BilinearEdgeDecoder(max_nodes)
         
         self.cls_token = nn.Parameter(torch.randn(1, 1, hidden_dims[-1]))
         self.dropout = nn.Dropout(dropout_rate)
@@ -616,21 +617,35 @@ class GRAPH_AUTOENCODER(nn.Module):
         # Remove CLS token
         u = u[:, 1:, :]
         
+        
+        # 패딩된 노드 무시하고 노드 임베딩 추출
+        node_output_list = []
+        for i in range(num_graphs):
+            num_nodes = z_list[i].size(0)
+            node_output_list.append(node_output[i, :num_nodes, :])
+
+        # 노드 임베딩을 이어붙임
+        u = torch.cat(node_output_list, dim=0)  # [total_num_nodes, hidden_dim]
+        # node_output_concat = torch.cat(node_output_list, dim=0)
+
+
+
         # Unpad and reconstruct node features and adjacency matrices
         x_recon_list = []
         adj_recon_list = []
+        idx = 0
         for i in range(num_graphs):
             num_nodes = (batch == i).sum().item()
-            u_graph = u[i, :num_nodes]
-            
+            u_graph = u[idx:idx + num_nodes]
             # Node feature reconstruction
             x_recon = self.node_decoder(u_graph)
             x_recon_list.append(x_recon)
             
             # Adjacency matrix reconstruction
-            adj_recon = torch.sigmoid(u_graph @ u_graph.t())
+            adj_recon = self.edge_decoder(z_graph)
             adj_recon_list.append(adj_recon)
-        
+            idx += num_nodes
+                
         x_recon = torch.cat(x_recon_list, dim=0)
         
         return x_recon, adj_recon_list, z, u, cls_output
@@ -639,6 +654,8 @@ class GRAPH_AUTOENCODER(nn.Module):
         # Node feature reconstruction loss
         
         loss = 0
+        start_node = 0
+        num_graphs = batch.max().item() + 1
         for i in range(num_graphs):
             num_nodes = (batch == i).sum().item()
             end_node = start_node + num_nodes
@@ -689,16 +706,20 @@ class GRAPH_AUTOENCODER(nn.Module):
             
         return local_anomalies, global_anomalies, reconstruction_error, mahalanobis_distances
 
+
+#%%
 # Training function
-def train(model, train_loader, optimizer, device, num_epochs):
+def train(model, train_loader, optimizer, device, max_nodes, num_epochs):
     model.train()
     for epoch in range(num_epochs):
         total_loss = 0
         for batch in train_loader:
             batch = batch.to(device)
             optimizer.zero_grad()
-            x_recon, adj_recon_list, _, _, cls_output = model(batch.x, batch.edge_index, batch.batch)
-            loss, node_loss, edge_loss = model.loss_function(batch.x, batch.edge_index, batch.batch, x_recon, adj_recon_list)
+            
+            adj = adj_original(batch.edge_index, batch.batch, max_nodes)
+            x_recon, adj_recon_list, _, _, cls_output = model(batch.x, batch.edge_index, batch.batch) 
+            loss, _, _ = model.loss_function(batch.x, x_recon, adj, adj_recon_list, batch.batch)
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
@@ -711,20 +732,37 @@ def train(model, train_loader, optimizer, device, num_epochs):
     with torch.no_grad():
         for batch in train_loader:
             batch = batch.to(device)
-            _, _, _, _, cls_output = model(batch.x, batch.edge_index, batch.batch)
+            x_recon, adj_recon_list, _, _, cls_output = model(batch.x, batch.edge_index, batch.batch)
+            loss, _, _ = model.loss_function(batch.x, x_recon, adj, adj_recon_list, batch.batch)
             cls_outputs.append(cls_output)
     cls_outputs = torch.cat(cls_outputs, dim=0)
     model.fit_global_distribution(cls_outputs)
 
-# Usage example
-num_features = 32
+
+#%%
+num_features = 3
 hidden_dims = [256, 128]
-model = GRAPH_AUTOENCODER(num_features, hidden_dims).to(device)
-optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
+splits = get_ad_split_TU(dataset_name, n_cross_val, random_seed)
+split=splits[0]
+
+loaders, meta = get_data_loaders_TU(dataset_name, batch_size, test_batch_size, split)
+num_features = meta['num_feat']
+max_nodes = meta['max_nodes']
+
+model = GRAPH_AUTOENCODER(num_features, hidden_dims, max_nodes, dropout_rate, noise_std=0.1).to(device)
+optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+
+train_loader = loaders['train']
+test_loader = loaders['test']
+
+
+#%%
 # Train the model
-train(model, train_loader, optimizer, device, num_epochs=100)
+train(model, train_loader, optimizer, device, max_nodes, num_epochs=100)
 
+
+#%%
 # Anomaly detection
 def detect_anomalies_in_dataset(model, data_loader, device):
     model.eval()
@@ -744,9 +782,12 @@ def detect_anomalies_in_dataset(model, data_loader, device):
 
     return local_anomalies_all, global_anomalies_all, reconstruction_errors_all, mahalanobis_distances_all
 
+
+#%%
 # Detect anomalies in test set
 local_anomalies, global_anomalies, reconstruction_errors, mahalanobis_distances = detect_anomalies_in_dataset(model, test_loader, device)
 
 # Print results
 print(f"Number of local anomalies detected: {sum(local_anomalies)}")
 print(f"Number of global anomalies detected: {sum(global_anomalies)}")
+# %%
