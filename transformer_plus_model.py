@@ -48,9 +48,9 @@ def train(model, train_loader, optimizer, max_nodes, device):
         x, edge_index, batch, num_graphs = data.x, data.edge_index, data.batch, data.num_graphs
 
         adj = adj_original(edge_index, batch, max_nodes)
-        print(f'adj: {adj[0]}')
+        print(f'adj: {adj[0][:7,:7]}')
         x_recon, adj_recon_list, train_cls_outputs, z_ = model(x, edge_index, batch, num_graphs)
-        print(f'adj: {adj_recon_list[0]}')
+        print(f'adj_recon: {adj_recon_list[0][:7,:7]}')
         
         loss = 0
         start_node = 0
@@ -63,7 +63,8 @@ def train(model, train_loader, optimizer, max_nodes, device):
             # print(f'train_node loss: {node_loss}')
             
             # Adjacency reconstruction loss
-            adj_loss = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2 / (num_nodes**2)
+            adj_loss = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2 / num_nodes
+            adj_loss = adj_loss / 20
             # print(f'train_adj_loss: {adj_loss}')
             
             loss += node_loss + adj_loss
@@ -108,19 +109,21 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
                 node_loss = (torch.norm(x_recon[start_node:end_node] - x[start_node:end_node], p='fro')**2) / num_nodes
                 
                 # Adjacency reconstruction error
-                adj_loss = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2 / (num_nodes**2)
+                adj_loss = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2 / num_nodes
                 
                 # 클러스터 중심과의 거리 계산
-                cls_vec = e_cls_output[i].cpu().numpy()  # [hidden_dim]
+                # cls_vec = e_cls_output[i].cpu().numpy()  # [hidden_dim]
+                cls_vec = e_cls_output[i].detach().cpu().numpy()  # [hidden_dim]
                 distances = cdist([cls_vec], cluster_centers, metric='euclidean')  # [1, n_clusters]
                 min_distance = distances.min()  # 가장 가까운 클러스터까지의 거리
-                
-                recon_error = node_loss.item() * 0.1 + adj_loss.item() * 1 + min_distance * 0.5
+
+                # recon_error = node_loss.item() * 0.1 + adj_loss.item() * 1 + min_distance * 0.5
+                recon_error = node_loss.item() * 0.1 + adj_loss.item() * 0.05 + min_distance * 0.5
                 recon_errors.append(recon_error.item())
                 
-                # print(f'test_node_loss: {node_loss.item() * 0.1 }')
-                # print(f'test_adj_loss: {adj_loss.item() * 1}')
-                # print(f'test_min_distance: {min_distance * 0.5 }')
+                print(f'test_node_loss: {node_loss.item() * 0.1 }')
+                print(f'test_adj_loss: {adj_loss.item() * 0.05}')
+                print(f'test_min_distance: {min_distance * 0.5 }')
 
                 if data.y[i].item() == 0:
                     total_loss += recon_error
@@ -156,26 +159,27 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
 '''ARGPARSER'''
 parser = argparse.ArgumentParser()
 
-parser.add_argument("--dataset-name", type=str, default='AIDS')
-parser.add_argument("--assets-root", type=str, default="./assets")
+parser.add_argument("--dataset-name", type=str, default='COX2')
 parser.add_argument("--data-root", type=str, default='./dataset')
+parser.add_argument("--assets-root", type=str, default="./assets")
 
 parser.add_argument("--epochs", type=int, default=300)
-parser.add_argument("--patience", type=int, default=10)
-parser.add_argument("--log_interval", type=int, default=2)
+parser.add_argument("--patience", type=int, default=5)
+parser.add_argument("--n-cluster", type=int, default=5)
 parser.add_argument("--n-cross-val", type=int, default=5)
+parser.add_argument("--random-seed", type=int, default=0)
+parser.add_argument("--log_interval", type=int, default=2)
 parser.add_argument("--batch-size", type=int, default=300)
-parser.add_argument("--random-seed", type=int, default=42)
-parser.add_argument("--test-batch-size", type=int, default=128)
 parser.add_argument("--n-test-anomaly", type=int, default=400)
+parser.add_argument("--test-batch-size", type=int, default=128)
 parser.add_argument("--hidden-dims", nargs='+', type=int, default=[256, 128])
 
 parser.add_argument("--factor", type=float, default=0.5)
 parser.add_argument("--step-size", type=int, default=20)
 parser.add_argument("--test-size", type=float, default=0.25)
-parser.add_argument("--weight-decay", type=float, default=1e-5)
-parser.add_argument("--learning-rate", type=float, default=0.0001)
 parser.add_argument("--dropout-rate", type=float, default=0.1)
+parser.add_argument("--weight-decay", type=float, default=0.0001)
+parser.add_argument("--learning-rate", type=float, default=0.0001)
 
 parser.add_argument("--dataset-AN", action="store_false")
 
@@ -193,20 +197,21 @@ dataset_name: str = args.dataset_name
 
 epochs: int = args.epochs
 patience: int = args.patience
-log_interval: int = args.log_interval
+n_cluster: int = args.n_cluster
 step_size: int = args.step_size
 batch_size: int = args.batch_size
 n_cross_val: int = args.n_cross_val
 random_seed: int = args.random_seed
 hidden_dims: list = args.hidden_dims
+log_interval: int = args.log_interval
 n_test_anomaly: int = args.n_test_anomaly
 test_batch_size: int = args.test_batch_size
 
 factor: float = args.factor
 test_size: float = args.test_size
 weight_decay: float = args.weight_decay
-learning_rate: float = args.learning_rate
 dropout_rate: float = args.dropout_rate
+learning_rate: float = args.learning_rate
 
 dataset_AN: bool = args.dataset_AN
 
@@ -248,6 +253,21 @@ class ResidualBlock(nn.Module):
         x = F.relu(self.bn(self.conv(x, edge_index)))
         x = self.dropout(x)
         return F.relu(x + residual)
+    
+    
+# class ResidualBlock(nn.Module):
+#     def __init__(self, in_channels, out_channels, dropout_rate=0.1):
+#         super(ResidualBlock, self).__init__()
+#         self.conv = GCNConv(in_channels, out_channels)
+#         self.bn = nn.BatchNorm1d(out_channels)
+#         self.dropout = nn.Dropout(dropout_rate)
+#         self.shortcut = nn.Linear(in_channels, out_channels) if in_channels != out_channels else nn.Identity()
+
+#     def forward(self, x, edge_index):
+#         residual = self.shortcut(x)
+#         x = F.relu(self.bn(self.conv(x, edge_index)))
+#         x = self.dropout(x)
+#         return F.relu(x + residual)
 
 
 class Encoder(nn.Module):
@@ -269,10 +289,13 @@ class Encoder(nn.Module):
 class FeatureDecoder(nn.Module):
     def __init__(self, embed_dim, num_features):
         super(FeatureDecoder, self).__init__()
-        self.fc = nn.Linear(embed_dim, num_features)
+        self.fc1 = nn.Linear(embed_dim, embed_dim//2)
+        self.fc2 = nn.Linear(embed_dim//2, num_features)
 
     def forward(self, z):
-        return self.fc(z)
+        z = self.fc1(z)
+        z = self.fc2(z)
+        return z
 
 
 class BilinearEdgeDecoder(nn.Module):
@@ -332,13 +355,13 @@ class TransformerEncoder(nn.Module):
         return output
 
 
-def perform_clustering(train_cls_outputs, n_clusters=5):
+def perform_clustering(train_cls_outputs, random_seed, n_clusters):
     # train_cls_outputs가 이미 텐서이므로, 그대로 사용
     cls_outputs_tensor = train_cls_outputs  # [total_num_graphs, hidden_dim]
     cls_outputs_np = cls_outputs_tensor.detach().cpu().numpy()
 
     # K-Means 클러스터링 수행
-    kmeans = KMeans(n_clusters=n_clusters, random_state=0).fit(cls_outputs_np)
+    kmeans = KMeans(n_clusters=n_clusters, random_state=random_seed).fit(cls_outputs_np)
 
     # 클러스터 중심 저장
     cluster_centers = kmeans.cluster_centers_
@@ -387,14 +410,17 @@ class GRAPH_AUTOENCODER(nn.Module):
         # 각 그래프에 대해 CLS 토큰 추가 및 패딩
         z_with_cls_list = []
         mask_list = []
+        
         for i in range(num_graphs):
             num_nodes = z_list[i].size(0)
             cls_token = self.cls_token.repeat(1, 1, 1)  # [1, 1, hidden_dim]
             cls_token = cls_token.to(device)
             z_graph = z_list[i].unsqueeze(1)  # [num_nodes, 1, hidden_dim]
+            
             # 패딩
             pad_size = max_nodes_in_batch - num_nodes
             z_graph_padded = F.pad(z_graph, (0, 0, 0, 0, 0, pad_size), 'constant', 0)  # [max_nodes, 1, hidden_dim]
+            
             # CLS 토큰 추가
             z_with_cls = torch.cat([cls_token, z_graph_padded.transpose(0, 1)], dim=1)  # [1, max_nodes+1, hidden_dim]
             z_with_cls_list.append(z_with_cls)
@@ -486,6 +512,7 @@ scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=factor, patience=pat
 
 # %%
 def run(dataset_name, random_seed, split=None, device=device):
+    all_results = []
     set_seed(random_seed)
 
     loaders, meta = get_data_loaders_TU(dataset_name, batch_size, test_batch_size, split)
@@ -494,6 +521,7 @@ def run(dataset_name, random_seed, split=None, device=device):
 
     model = GRAPH_AUTOENCODER(num_features, hidden_dims, max_nodes, dropout_rate=dropout_rate).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=factor, patience=patience, verbose=True)
 
     train_loader = loaders['train']
     test_loader = loaders['test']
@@ -504,18 +532,22 @@ def run(dataset_name, random_seed, split=None, device=device):
 
     for epoch in range(1, epochs+1):
         train_loss, num_sample, train_cls_outputs = train(model, train_loader, optimizer, max_nodes, device)
-
+        
         info_train = 'Epoch {:3d}, Loss {:.4f}'.format(epoch, train_loss)
 
         if epoch % log_interval == 0:
-            kmeans, cluster_centers = perform_clustering(train_cls_outputs, n_clusters=5)
+            kmeans, cluster_centers = perform_clustering(train_cls_outputs, random_seed, n_clusters=n_cluster)
             
-            auroc, auprc, precision, recall, f1, test_loss, test_loss_anomaly = evaluate_model(model, test_loader, max_nodes, train_cls_outputs, device)
-
+            auroc, auprc, precision, recall, f1, test_loss, test_loss_anomaly = evaluate_model(model, test_loader, max_nodes, cluster_centers, device)
+            
+            scheduler.step(auroc)
+            
+            all_results.append((auroc, auprc, precision, recall, f1, test_loss, test_loss_anomaly))
+            print(f'Epoch {epoch+1}: Training Loss = {train_loss:.4f}, Validation loss = {test_loss:.4f}, Validation loss anomaly = {test_loss_anomaly:.4f}, Validation AUC = {auroc:.4f}, Validation AUPRC = {auprc:.4f}, Precision = {precision:.4f}, Recall = {recall:.4f}, F1 = {f1:.4f}')
+            
             info_test = 'AD_AUC:{:.4f}, AD_AUPRC:{:.4f}, Test_Loss:{:.4f}, Test_Loss_Anomaly:{:.4f}'.format(auroc, auprc, test_loss, test_loss_anomaly)
 
             print(info_train + '   ' + info_test)
-    
 
     return auroc
 
@@ -523,12 +555,11 @@ def run(dataset_name, random_seed, split=None, device=device):
 #%%
 if __name__ == '__main__':
     ad_aucs = []
-    splits = get_ad_split_TU(dataset_name, n_cross_val, random_seed)
-    key_auc_list = []
+    splits = get_ad_split_TU(dataset_name, n_cross_val, random_seed)    
 
     for trial in range(n_cross_val):
-        results = run(dataset_name, random_seed, split=splits[trial])
-        ad_auc = results
+        print(f"Starting fold {trial + 1}/{n_cross_val}")
+        ad_auc = run(dataset_name, random_seed, split=splits[trial])
         ad_aucs.append(ad_auc)
 
     results = 'AUC: {:.2f}+-{:.2f}'.format(np.mean(ad_aucs) * 100, np.std(ad_aucs) * 100)
