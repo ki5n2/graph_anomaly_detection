@@ -19,8 +19,9 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from torch_geometric.loader import DataLoader
 from torch_geometric.datasets import TUDataset
-from torch_geometric.utils import to_dense_adj, to_dense_batch
 from torch_geometric.data import Data, DataLoader, Batch
+from torch_geometric.utils import to_dense_adj, to_dense_batch
+from torch.optim.lr_scheduler import CosineAnnealingLR, ExponentialLR, OneCycleLR
 from torch_geometric.nn import GCNConv, global_mean_pool, global_max_pool, global_add_pool
 
 from sklearn.cluster import KMeans
@@ -125,9 +126,9 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
                 recon_error = node_loss.item() * 0.3 + adj_loss.item() * 0.025 + min_distance * 0.25
                 recon_errors.append(recon_error.item())
                 
-                print(f'test_node_loss: {node_loss.item() * 0.3 }')
+                print(f'test_node_loss: {node_loss.item() * 0.3}')
                 print(f'test_adj_loss: {adj_loss.item() * 0.025}')
-                print(f'test_min_distance: {min_distance * 0.25 }')
+                print(f'test_min_distance: {min_distance * 0.25}')
 
                 if data.y[i].item() == 0:
                     total_loss += recon_error
@@ -163,7 +164,7 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
 '''ARGPARSER'''
 parser = argparse.ArgumentParser()
 
-parser.add_argument("--dataset-name", type=str, default='COX2')
+parser.add_argument("--dataset-name", type=str, default='Tox21_p53_training')
 parser.add_argument("--data-root", type=str, default='./dataset')
 parser.add_argument("--assets-root", type=str, default="./assets")
 
@@ -172,10 +173,10 @@ parser.add_argument("--patience", type=int, default=5)
 parser.add_argument("--n-cluster", type=int, default=5)
 parser.add_argument("--n-cross-val", type=int, default=5)
 parser.add_argument("--random-seed", type=int, default=0)
-parser.add_argument("--log_interval", type=int, default=2)
+parser.add_argument("--log_interval", type=int, default=5)
 parser.add_argument("--batch-size", type=int, default=300)
 parser.add_argument("--n-test-anomaly", type=int, default=400)
-parser.add_argument("--test-batch-size", type=int, default=128)
+parser.add_argument("--test-batch-size", type=int, default=9999)
 parser.add_argument("--hidden-dims", nargs='+', type=int, default=[256, 128])
 
 parser.add_argument("--factor", type=float, default=0.5)
@@ -291,13 +292,13 @@ class Encoder(nn.Module):
 
 
 class FeatureDecoder(nn.Module):
-    def __init__(self, embed_dim, num_features, bias=True):
+    def __init__(self, embed_dim, num_features):
         super(FeatureDecoder, self).__init__()
-        self.fc1 = nn.Linear(embed_dim, embed_dim//2, bias=bias)
-        self.fc2 = nn.Linear(embed_dim//2, num_features, bias=bias)
+        self.fc1 = nn.Linear(embed_dim, embed_dim//2)
+        self.fc2 = nn.Linear(embed_dim//2, num_features)
 
     def forward(self, z):
-        z = F.relu(self.fc1(z))
+        z = self.fc1(z)
         z = self.fc2(z)
         return z
 
@@ -341,7 +342,7 @@ class PositionalEncoding(nn.Module):
         # x: [seq_len, batch_size, d_model]
         x = x + self.pe[:x.size(0)]
         return self.dropout(x)
-
+    
     
 # 트랜스포머 인코더 클래스 수정
 class TransformerEncoder_(nn.Module):
@@ -357,8 +358,8 @@ class TransformerEncoder_(nn.Module):
         src = self.pos_encoder(src * torch.sqrt(torch.tensor(self.d_model, dtype=torch.float32).to(src.device)))
         output = self.transformer_encoder(src, src_key_padding_mask=src_key_padding_mask)
         return output
-
-
+    
+    
 class TransformerEncoder(nn.Module):
     def __init__(self, d_model, nhead, num_layers, dim_feedforward, dropout=0.1):
         super(TransformerEncoder, self).__init__()
@@ -371,33 +372,6 @@ class TransformerEncoder(nn.Module):
         output = self.transformer_encoder(src, src_key_padding_mask=src_key_padding_mask)
         return output
 
-
-# class GraphPositionalEncoding(nn.Module):
-#     def __init__(self, d_model, max_nodes):
-#         super(GraphPositionalEncoding, self).__init__()
-#         self.embedding = nn.Embedding(max_nodes, d_model)
-    
-#     def forward(self, x):
-#         batch_size, num_nodes, _ = x.size()
-#         positions = torch.arange(num_nodes, device=x.device).unsqueeze(0).repeat(batch_size, 1)
-#         pos_encoding = self.embedding(positions)
-#         return x + pos_encoding
-
-# class TransformerEncoder(nn.Module):
-#     def __init__(self, d_model, nhead, num_layers, dim_feedforward, dropout=0.1, max_nodes=1000):
-#         super(TransformerEncoder, self).__init__()
-#         self.pos_encoder = GraphPositionalEncoding(d_model, max_nodes)
-#         encoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation='relu')
-#         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers)
-#         self.d_model = d_model
-
-#     def forward(self, src, src_key_padding_mask=None):
-#         # src: [batch_size, num_nodes, d_model]
-#         src = self.pos_encoder(src)
-#         src = src.transpose(0, 1)  # [num_nodes, batch_size, d_model]
-#         output = self.transformer_encoder(src, src_key_padding_mask=src_key_padding_mask)
-#         return output.transpose(0, 1)  # [batch_size, num_nodes, d_model]
-    
 
 def perform_clustering(train_cls_outputs, random_seed, n_clusters):
     # train_cls_outputs가 이미 텐서이므로, 그대로 사용
@@ -422,7 +396,7 @@ class GRAPH_AUTOENCODER(nn.Module):
         self.transformer_encoder = TransformerEncoder(
             d_model=hidden_dims[-1],
             nhead=8,
-            num_layers=4,
+            num_layers=2,
             dim_feedforward=hidden_dims[-1] * 4,
             dropout=dropout_rate
         )
@@ -545,85 +519,106 @@ class GRAPH_AUTOENCODER(nn.Module):
             start_idx += num_nodes
         return torch.cat(edge_index_list, dim=1)
     
-
+    
 #%%
 '''DATASETS'''
-splits = get_ad_split_TU(dataset_name, n_cross_val, random_seed)
-loaders, meta = get_data_loaders_TU(dataset_name, batch_size, test_batch_size, splits[0])
-num_train = meta['num_train']
-num_features = meta['num_feat']
-num_edge_features = meta['num_edge_feat']
-max_nodes = meta['max_nodes']
+graph_dataset = TUDataset(root=data_root, name=dataset_name).shuffle()
 
-print(f'Number of graphs: {num_train}')
-print(f'Number of features: {num_features}')
-print(f'Number of edge features: {num_edge_features}')
-print(f'Max nodes: {max_nodes}')
+print(f'Number of graphs: {len(graph_dataset)}')
+print(f'Number of features: {graph_dataset.num_features}')
+print(f'Number of edge features: {graph_dataset.num_edge_features}')
+
+dataset_normal = [data for data in graph_dataset if data.y.item() == 0]
+dataset_anomaly = [data for data in graph_dataset if data.y.item() == 1]
+
+print(f"Number of normal samples: {len(dataset_normal)}")
+print(f"Number of anomaly samples: {len(dataset_anomaly)}")
+
+train_normal_data, test_normal_data = train_test_split(dataset_normal, test_size=test_size, random_state=random_seed)
+evaluation_data = test_normal_data + dataset_anomaly[:n_test_anomaly]
+
+train_loader = DataLoader(train_normal_data, batch_size=batch_size, shuffle=True)
+test_loader = DataLoader(evaluation_data, batch_size=test_batch_size, shuffle=True)
+
+print(f"Number of samples in the evaluation dataset: {len(evaluation_data)}")
+print(f"Number of test normal data: {len(test_normal_data)}")
+print(f"Number of test anomaly samples: {len(dataset_anomaly[:n_test_anomaly])}")
+print(f"Ratio of test anomaly: {len(dataset_anomaly[:n_test_anomaly]) / len(evaluation_data)}")
+
+
+#%%
+# graph_dataset = TUDataset(root='./dataset', name='NCI1')
+# graph_dataset = graph_dataset.shuffle()
+
+# print(f'Number of graphs: {len(graph_dataset)}')
+# print(f'Number of features: {graph_dataset.num_features}')
+# print(f'Number of edge features: {graph_dataset.num_edge_features}')
+
+# dataset_normal = [data for data in graph_dataset if data.y.item() == 1]
+# dataset_anomaly = [data for data in graph_dataset if data.y.item() == 0]
+# train_data, test_data = train_test_split(dataset_normal, test_size=test_size, random_state=random_seed)
+# evaluation_data = test_data + dataset_anomaly[:n_test_anomaly]
+
+# train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
+# test_loader = DataLoader(evaluation_data, batch_size=test_batch_size, shuffle=True)
+
+# print(f"Number of normal samples: {len(dataset_normal)}")
+# print(f"Number of anomaly samples: {len(dataset_anomaly)}")
+# print(f"Number of test normal data: {len(test_data)}")
+# print(f"Number of test anomaly samples: {len(dataset_anomaly[:n_test_anomaly])}")
+# print(f"Number of samples in the evaluation dataset: {len(evaluation_data)}")
 
 
 #%%
 '''MODEL AND OPTIMIZER DEFINE'''
+num_features = graph_dataset.num_features
+max_nodes = max([graph_dataset[i].num_nodes for i in range(len(graph_dataset))])  # 데이터셋에서 최대 노드 수 계산
 model = GRAPH_AUTOENCODER(num_features, hidden_dims, max_nodes, dropout_rate=dropout_rate).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay) # L2 regularization
 scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=factor, patience=patience, verbose=True)
 
 
-# %%
-def run(dataset_name, random_seed, split=None, device=device):
-    all_results = []
-    set_seed(random_seed)
-
-    loaders, meta = get_data_loaders_TU(dataset_name, batch_size, test_batch_size, split)
-    num_features = meta['num_feat']
-    max_nodes = meta['max_nodes']
-
-    model = GRAPH_AUTOENCODER(num_features, hidden_dims, max_nodes, dropout_rate=dropout_rate).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-    scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=factor, patience=patience, verbose=True)
-
-    train_loader = loaders['train']
-    test_loader = loaders['test']
-
-    # 훈련 단계에서 cls_outputs 저장할 리스트 초기화
-    global train_cls_outputs
-    train_cls_outputs = []
-
-    for epoch in range(1, epochs+1):
-        train_loss, num_sample, train_cls_outputs = train(model, train_loader, optimizer, max_nodes, device)
+#%%
+ad_aucs = []
+all_results = []
+for epoch in range(1, epochs+1):
+    train_loss, num_sample, train_cls_outputs = train(model, train_loader, optimizer, max_nodes, device)
         
-        info_train = 'Epoch {:3d}, Loss {:.4f}'.format(epoch, train_loss)
+    info_train = 'Epoch {:3d}, Loss {:.4f}'.format(epoch, train_loss)
 
-        if epoch % log_interval == 0:
-            kmeans, cluster_centers = perform_clustering(train_cls_outputs, random_seed, n_clusters=n_cluster)
+    if epoch % log_interval == 0:
+        kmeans, cluster_centers = perform_clustering(train_cls_outputs, random_seed, n_clusters=n_cluster)
             
-            auroc, auprc, precision, recall, f1, test_loss, test_loss_anomaly = evaluate_model(model, test_loader, max_nodes, cluster_centers, device)
+        auroc, auprc, precision, recall, f1, test_loss, test_loss_anomaly = evaluate_model(model, test_loader, max_nodes, cluster_centers, device)
             
-            scheduler.step(auroc)
+        scheduler.step(train_loss)
             
-            all_results.append((auroc, auprc, precision, recall, f1, test_loss, test_loss_anomaly))
-            print(f'Epoch {epoch+1}: Training Loss = {train_loss:.4f}, Validation loss = {test_loss:.4f}, Validation loss anomaly = {test_loss_anomaly:.4f}, Validation AUC = {auroc:.4f}, Validation AUPRC = {auprc:.4f}, Precision = {precision:.4f}, Recall = {recall:.4f}, F1 = {f1:.4f}')
+        all_results.append((auroc, auprc, precision, recall, f1, test_loss, test_loss_anomaly))
+        print(f'Epoch {epoch+1}: Training Loss = {train_loss:.4f}, Validation loss = {test_loss:.4f}, Validation loss anomaly = {test_loss_anomaly:.4f}, Validation AUC = {auroc:.4f}, Validation AUPRC = {auprc:.4f}, Precision = {precision:.4f}, Recall = {recall:.4f}, F1 = {f1:.4f}')
+        wandb.log({
+            "epoch": epoch,
+            "train_loss": train_loss,
+            "val_loss": test_loss,
+            "val_loss_anomaly": test_loss_anomaly,
+            "auroc": auroc,
+            "auprc": auprc,
+            "precision": precision,
+            "recall": recall,
+            "f1": f1,
+            "learning_rate": optimizer.param_groups[0]['lr']
+        })
             
-            info_test = 'AD_AUC:{:.4f}, AD_AUPRC:{:.4f}, Test_Loss:{:.4f}, Test_Loss_Anomaly:{:.4f}'.format(auroc, auprc, test_loss, test_loss_anomaly)
+        info_test = 'AD_AUC:{:.4f}, AD_AUPRC:{:.4f}, Test_Loss:{:.4f}, Test_Loss_Anomaly:{:.4f}'.format(auroc, auprc, test_loss, test_loss_anomaly)
 
-            print(info_train + '   ' + info_test)
-
-    return auroc
+        print(info_train + '   ' + info_test)
+        
+        ad_aucs.append(auroc)
 
 
 #%%
-if __name__ == '__main__':
-    ad_aucs = []
-    splits = get_ad_split_TU(dataset_name, n_cross_val, random_seed)    
+results = 'AUC: {:.2f}+-{:.2f}'.format(np.mean(ad_aucs) * 100, np.std(ad_aucs) * 100)
 
-    for trial in range(n_cross_val):
-        print(f"Starting fold {trial + 1}/{n_cross_val}")
-        ad_auc = run(dataset_name, random_seed, split=splits[trial])
-        ad_aucs.append(ad_auc)
+print('[FINAL RESULTS] ' + results)
 
-    results = 'AUC: {:.2f}+-{:.2f}'.format(np.mean(ad_aucs) * 100, np.std(ad_aucs) * 100)
-    print(len(ad_aucs))
+wandb.finish()
 
-    print('[FINAL RESULTS] ' + results)
-    
-    
-# %%
