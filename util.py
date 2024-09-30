@@ -254,7 +254,12 @@ def get_data_loaders_TU(dataset_name, batch_size, test_batch_size, split):
         old_data = dataset_[i]
         num_nodes = old_data.num_nodes
         new_x = torch.tensor(node_attrs[node_idx:node_idx+num_nodes], dtype=torch.float)
-        new_data = Data(x=new_x, edge_index=old_data.edge_index, y=old_data.y)
+        
+        if dataset_name != 'NCI1':
+            new_data = Data(x=new_x, edge_index=old_data.edge_index, y=old_data.y)
+        else:
+            new_data = Data(x=old_data.x, edge_index=old_data.edge_index, y=old_data.y)
+        
         dataset.append(new_data)
         node_idx += num_nodes
 
