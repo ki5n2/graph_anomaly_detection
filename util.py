@@ -5,11 +5,11 @@ import random
 import numpy as np
 import os.path as osp
 
+from torch_geometric.data import Data
 from torch_geometric.data import Batch
 from torch_geometric.loader import DataLoader
 from torch_geometric.datasets import TUDataset
 from torch_geometric.transforms import Constant
-from torch_geometric.data import Data, DataLoader
 from sklearn.model_selection import StratifiedKFold
 from torch_geometric.utils import to_dense_adj, to_undirected, to_networkx
 
@@ -210,7 +210,7 @@ class EarlyStopping:
 
 #%%
 '''SIGNET'''
-def get_ad_split_TU(dataset_name, n_cross_val, random_seed):
+def get_ad_split_TU(dataset_name, n_cross_val):
     path = osp.join(osp.dirname(osp.realpath(__file__)), 'dataset')
     dataset = TUDataset(path, name=dataset_name)
     data_list = []
@@ -220,7 +220,7 @@ def get_ad_split_TU(dataset_name, n_cross_val, random_seed):
         data_list.append(data)
         label_list.append(data.y.item())
 
-    kfd = StratifiedKFold(n_splits=n_cross_val, random_state=random_seed, shuffle=True)
+    kfd = StratifiedKFold(n_splits=n_cross_val, random_state=1, shuffle=True)
 
     splits = []
     for k, (train_index, test_index) in enumerate(kfd.split(data_list, label_list)):
@@ -229,7 +229,7 @@ def get_ad_split_TU(dataset_name, n_cross_val, random_seed):
     return splits
 
 
-def get_data_loaders_TU(dataset_name, batch_size, test_batch_size, split):
+def get_data_loaders_TU(dataset_name, batch_size, test_batch_size, split, dataset_AN):
     path = osp.join(osp.dirname(osp.realpath(__file__)), 'dataset')
     dataset_ = TUDataset(path, name=dataset_name)
         
@@ -278,18 +278,25 @@ def get_data_loaders_TU(dataset_name, batch_size, test_batch_size, split):
     data_test = [data_list[i] for i in test_index]
 
     data_train = []
-    for data in data_train_:
-        if data.y != 0:
-            data_train.append(data)
+    if dataset_AN:
+        for data in data_train_:
+            if data.y != 0:
+                data_train.append(data) 
+    else:
+        for data in data_train_:
+            if data.y == 0:
+                data_train.append(data) 
 
-    idx = 0
-    for data in data_train:
-        data.y = 0
-        data['idx'] = idx
-        idx += 1
-
-    for data in data_test:
-        data.y = 1 if data.y == 0 else 0
+    if dataset_AN:
+        idx = 0
+        for data in data_train:
+            data.y = 0
+            data['idx'] = idx
+            idx += 1
+    
+    if dataset_AN:
+        for data in data_test:
+            data.y = 1 if data.y == 0 else 0
 
     max_nodes = max([dataset[i].num_nodes for i in range(len(dataset))])
     dataloader = DataLoader(data_train, batch_size, shuffle=True)
@@ -298,3 +305,5 @@ def get_data_loaders_TU(dataset_name, batch_size, test_batch_size, split):
     loader_dict = {'train': dataloader, 'test': dataloader_test}
 
     return loader_dict, meta
+
+# %%

@@ -17,10 +17,10 @@ import torch.nn.functional as F
 from torch.nn import init
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
+from torch_geometric.data import Data, Batch
 from torch_geometric.loader import DataLoader
 from torch_geometric.datasets import TUDataset
 from torch_geometric.utils import to_dense_adj, to_dense_batch
-from torch_geometric.data import Data, DataLoader, Batch
 from torch_geometric.nn import GCNConv, global_mean_pool, global_max_pool, global_add_pool
 
 from sklearn.cluster import KMeans
@@ -68,7 +68,7 @@ def train(model, train_loader, optimizer, max_nodes, device):
             print(f'train_adj_loss: {adj_loss}')
             
             z_node_loss = torch.norm(z_tilde[start_node:end_node] - z_[start_node:end_node], p='fro')**2 / num_nodes
-            z_node_loss = z_node_loss * 0.3
+            # z_node_loss = z_node_loss * 0.3
             print(f'train_z_node loss: {z_node_loss}')
             
             loss += node_loss + adj_loss + z_node_loss
@@ -88,8 +88,8 @@ def train(model, train_loader, optimizer, max_nodes, device):
 '''EVALUATION'''
 def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
     model.eval()
-    total_loss = 0
-    total_loss_anomaly = 0
+    total_loss_ = 0
+    total_loss_anomaly_ = 0
 
     all_labels = []
     all_scores = []
@@ -130,12 +130,15 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
                 print(f'test_min_distance: {min_distance * 0.25 }')
 
                 if data.y[i].item() == 0:
-                    total_loss += recon_error
+                    total_loss_ += recon_error
                 else:
-                    total_loss_anomaly += recon_error
+                    total_loss_anomaly_ += recon_error
 
                 start_node = end_node
-
+            
+            total_loss = total_loss_ / sum(data.y == 0)
+            total_loss_anomaly = total_loss_anomaly_ / sum(data.y == 1)
+                
             all_scores.extend(recon_errors)
             all_labels.extend(data.y.cpu().numpy())
 
@@ -156,7 +159,7 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
     recall = recall_score(all_labels, pred_labels)
     f1 = f1_score(all_labels, pred_labels)
 
-    return auroc, auprc, precision, recall, f1, total_loss / len(test_loader), total_loss_anomaly / len(test_loader)
+    return auroc, auprc, precision, recall, f1, total_loss, total_loss
 
 
 #%%
@@ -172,8 +175,8 @@ parser.add_argument("--patience", type=int, default=5)
 parser.add_argument("--n-cluster", type=int, default=5)
 parser.add_argument("--n-cross-val", type=int, default=5)
 parser.add_argument("--random-seed", type=int, default=0)
-parser.add_argument("--log_interval", type=int, default=2)
 parser.add_argument("--batch-size", type=int, default=300)
+parser.add_argument("--log_interval", type=int, default=2)
 parser.add_argument("--n-test-anomaly", type=int, default=400)
 parser.add_argument("--test-batch-size", type=int, default=128)
 parser.add_argument("--hidden-dims", nargs='+', type=int, default=[256, 128])
@@ -362,7 +365,9 @@ class TransformerEncoder_(nn.Module):
 class TransformerEncoder(nn.Module):
     def __init__(self, d_model, nhead, num_layers, dim_feedforward, dropout=0.1):
         super(TransformerEncoder, self).__init__()
-        encoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation='relu')
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model, nhead, dim_feedforward, dropout, activation='relu', batch_first=True
+        )
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers)
         self.d_model = d_model
 
@@ -371,6 +376,22 @@ class TransformerEncoder(nn.Module):
         output = self.transformer_encoder(src, src_key_padding_mask=src_key_padding_mask)
         return output
 
+
+class TransformerEncoder(nn.Module):
+    def __init__(self, d_model, nhead, num_layers, dim_feedforward, dropout=0.1):
+        super(TransformerEncoder, self).__init__()
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model, nhead, dim_feedforward, dropout, activation='relu', batch_first=True
+        )
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers)
+        self.d_model = d_model
+
+    def forward(self, src, src_key_padding_mask):
+        # src의 차원을 [batch_size, seq_len, d_model]로 변경
+        # src_key_padding_mask도 이에 맞춰서 차원 조정이 필요하다면 조정
+        src_key_padding_mask = src_key_padding_mask.transpose(0, 1)
+        output = self.transformer_encoder(src, src_key_padding_mask=src_key_padding_mask)
+        return output
 
 # class GraphPositionalEncoding(nn.Module):
 #     def __init__(self, d_model, max_nodes):
@@ -405,7 +426,7 @@ def perform_clustering(train_cls_outputs, random_seed, n_clusters):
     cls_outputs_np = cls_outputs_tensor.detach().cpu().numpy()
 
     # K-Means 클러스터링 수행
-    kmeans = KMeans(n_clusters=n_clusters, random_state=random_seed).fit(cls_outputs_np)
+    kmeans = KMeans(n_clusters=n_clusters, random_state=random_seed, n_init= 10).fit(cls_outputs_np)
 
     # 클러스터 중심 저장
     cluster_centers = kmeans.cluster_centers_
@@ -548,8 +569,9 @@ class GRAPH_AUTOENCODER(nn.Module):
 
 #%%
 '''DATASETS'''
-splits = get_ad_split_TU(dataset_name, n_cross_val, random_seed)
-loaders, meta = get_data_loaders_TU(dataset_name, batch_size, test_batch_size, splits[0])
+dataset_AN = False
+splits = get_ad_split_TU(dataset_name, n_cross_val)
+loaders, meta = get_data_loaders_TU(dataset_name, batch_size, test_batch_size, splits[0], dataset_AN)
 num_train = meta['num_train']
 num_features = meta['num_feat']
 num_edge_features = meta['num_edge_feat']
@@ -569,11 +591,11 @@ scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=factor, patience=pat
 
 
 # %%
-def run(dataset_name, random_seed, split=None, device=device):
+def run(dataset_name, random_seed, dataset_AN, split=None, device=device):
     all_results = []
     set_seed(random_seed)
 
-    loaders, meta = get_data_loaders_TU(dataset_name, batch_size, test_batch_size, split)
+    loaders, meta = get_data_loaders_TU(dataset_name, batch_size, test_batch_size, split, dataset_AN)
     num_features = meta['num_feat']
     max_nodes = meta['max_nodes']
 
@@ -613,11 +635,11 @@ def run(dataset_name, random_seed, split=None, device=device):
 #%%
 if __name__ == '__main__':
     ad_aucs = []
-    splits = get_ad_split_TU(dataset_name, n_cross_val, random_seed)    
+    splits = get_ad_split_TU(dataset_name, n_cross_val)    
 
     for trial in range(n_cross_val):
         print(f"Starting fold {trial + 1}/{n_cross_val}")
-        ad_auc = run(dataset_name, random_seed, split=splits[trial])
+        ad_auc = run(dataset_name, random_seed, dataset_AN, split=splits[trial])
         ad_aucs.append(ad_auc)
 
     results = 'AUC: {:.2f}+-{:.2f}'.format(np.mean(ad_aucs) * 100, np.std(ad_aucs) * 100)
