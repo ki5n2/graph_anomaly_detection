@@ -269,21 +269,6 @@ class ResidualBlock(nn.Module):
         x = F.relu(self.bn(self.conv(x, edge_index)))
         x = self.dropout(x)
         return F.relu(x + residual)
-    
-    
-# class ResidualBlock(nn.Module):
-#     def __init__(self, in_channels, out_channels, dropout_rate=0.1):
-#         super(ResidualBlock, self).__init__()
-#         self.conv = GCNConv(in_channels, out_channels)
-#         self.bn = nn.BatchNorm1d(out_channels)
-#         self.dropout = nn.Dropout(dropout_rate)
-#         self.shortcut = nn.Linear(in_channels, out_channels) if in_channels != out_channels else nn.Identity()
-
-#     def forward(self, x, edge_index):
-#         residual = self.shortcut(x)
-#         x = F.relu(self.bn(self.conv(x, edge_index)))
-#         x = self.dropout(x)
-#         return F.relu(x + residual)
 
 
 class Encoder(nn.Module):
@@ -343,53 +328,19 @@ class BilinearEdgeDecoder(nn.Module):
         return padded_adj
     
 
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, dropout=0.1, max_len=1000):
-        super(PositionalEncoding, self).__init__()
-        self.dropout = nn.Dropout(p=dropout)
-        
-        # 포지셔널 인코딩 계산
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        # div_term 계산
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-        # 포지셔널 인코딩 적용
-        pe[:, 0::2] = torch.sin(position * div_term)  # 짝수 인덱스
-        pe[:, 1::2] = torch.cos(position * div_term)  # 홀수 인덱스
-        pe = pe.unsqueeze(1)  # 크기를 [max_len, 1, d_model]로 변경
-        self.register_buffer('pe', pe)
-
-    def forward(self, x):
-        # x: [seq_len, batch_size, d_model]
-        x = x + self.pe[:x.size(0)]
-        return self.dropout(x)
-    
-    
-# 트랜스포머 인코더 클래스 수정
-class TransformerEncoder_(nn.Module):
-    def __init__(self, d_model, nhead, num_layers, dim_feedforward, dropout=0.1):
-        super(TransformerEncoder_, self).__init__()
-        encoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation='relu')
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers)
-        self.pos_encoder = PositionalEncoding(d_model, dropout)
-        self.d_model = d_model
-
-    def forward(self, src, src_key_padding_mask):
-        # src: [seq_len, batch_size, d_model]
-        src = self.pos_encoder(src * torch.sqrt(torch.tensor(self.d_model, dtype=torch.float32).to(src.device)))
-        output = self.transformer_encoder(src, src_key_padding_mask=src_key_padding_mask)
-        return output
-    
-    
 class TransformerEncoder(nn.Module):
     def __init__(self, d_model, nhead, num_layers, dim_feedforward, dropout=0.1):
         super(TransformerEncoder, self).__init__()
-        encoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation='relu', batch_first=True)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model, nhead, dim_feedforward, dropout, activation='relu', batch_first=True
+        )
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers)
         self.d_model = d_model
 
     def forward(self, src, src_key_padding_mask):
-        # src: [seq_len, batch_size, d_model]
+        # src의 차원을 [batch_size, seq_len, d_model]로 변경
+        # src_key_padding_mask도 이에 맞춰서 차원 조정이 필요하다면 조정
+        src_key_padding_mask = src_key_padding_mask.transpose(0, 1)
         output = self.transformer_encoder(src, src_key_padding_mask=src_key_padding_mask)
         return output
 
