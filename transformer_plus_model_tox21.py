@@ -20,7 +20,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch_geometric.loader import DataLoader
 from torch_geometric.datasets import TUDataset
 from torch_geometric.data import Data, DataLoader, Batch
-from torch_geometric.utils import to_dense_adj, to_dense_batch, add_self_loops
+from torch_geometric.utils import to_dense_adj, to_dense_batch, add_self_loops, to_scipy_sparse_matrix, degree, from_networkx
 from torch.optim.lr_scheduler import CosineAnnealingLR, ExponentialLR, OneCycleLR
 from torch_geometric.nn import GCNConv, global_mean_pool, global_max_pool, global_add_pool
 
@@ -185,9 +185,9 @@ parser.add_argument("--n-cluster", type=int, default=5)
 parser.add_argument("--n-cross-val", type=int, default=5)
 parser.add_argument("--random-seed", type=int, default=0)
 parser.add_argument("--log-interval", type=int, default=5)
-parser.add_argument("--batch-size", type=int, default=300)
+parser.add_argument("--batch-size", type=int, default=2000)
 parser.add_argument("--n-test-anomaly", type=int, default=400)
-parser.add_argument("--test-batch-size", type=int, default=9999)
+parser.add_argument("--test-batch-size", type=int, default=128)
 parser.add_argument("--hidden-dims", nargs='+', type=int, default=[256, 128])
 
 parser.add_argument("--factor", type=float, default=0.5)
@@ -543,58 +543,103 @@ class GRAPH_AUTOENCODER(nn.Module):
         return torch.cat(edge_index_list, dim=1)
 
 
-#%% 
-dataloader, dataloader_test, meta = get_ad_dataset_Tox21(dataset_name, batch_size, test_batch_size)
-for trial in range(n_cross_val):
-    set_seed(random_seed)
-    num_features = meta['num_feat']
-    n_train = meta['num_train']
-    
-    model = GRAPH_AUTOENCODER(num_features, hidden_dims, max_nodes, dropout_rate=dropout_rate).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-
-    for epoch in range(1, args.num_epoch + 1):
-        model.train()
-        for data in dataloader:
-            data = data.to(device)
-
-        if epoch % args.eval_freq == 0:
-            model.eval()
-            for data in dataloader_test:
-                data
-
-            auc = skm.roc_auc_score(y_true_all, y_score_all)
-
-    
 #%%
 '''DATASETS'''
 if dataset_name == 'AIDS' or dataset_name == 'NCI1' or dataset_name == 'DHFR':
     dataset_AN = True
 else:
     dataset_AN = False
+    
+loaders, meta = get_ad_dataset_Tox21(dataset_name, batch_size, test_batch_size)
 
-graph_dataset = TUDataset(root=data_root, name=dataset_name).shuffle()
 
-print(f'Number of graphs: {len(graph_dataset)}')
-print(f'Number of features: {graph_dataset.num_features}')
-print(f'Number of edge features: {graph_dataset.num_edge_features}')
+#%%
+def run(loaders, meta, random_seed, device=device):
+    all_results = []
+    set_seed(random_seed)
+    
+    num_features = meta['num_feat']
+    n_train = meta['num_train']
+    max_nodes = meta['max_nodes']
+    
+    model = GRAPH_AUTOENCODER(num_features, hidden_dims, max_nodes, dropout_rate=dropout_rate).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=factor, patience=patience, verbose=True)
 
-dataset_normal = [data for data in graph_dataset if data.y.item() == 0]
-dataset_anomaly = [data for data in graph_dataset if data.y.item() == 1]
+    train_loader = loaders['train']
+    test_loader = loaders['test']
 
-print(f"Number of normal samples: {len(dataset_normal)}")
-print(f"Number of anomaly samples: {len(dataset_anomaly)}")
+    global train_cls_outputs
+    train_cls_outputs = []
+    
+    for epoch in range(1, epochs+1):
+        train_loss, num_sample, train_cls_outputs = train(model, train_loader, optimizer, max_nodes, device)
+        
+        info_train = 'Epoch {:3d}, Loss {:.4f}'.format(epoch, train_loss)
+        
+        if epoch % log_interval == 0:
+            kmeans, cluster_centers = perform_clustering(train_cls_outputs, random_seed, n_clusters=n_cluster)
+            
+            auroc, auprc, precision, recall, f1, test_loss, test_loss_anomaly = evaluate_model(model, test_loader, max_nodes, cluster_centers, device)
+            
+            scheduler.step(train_loss)
+            
+            all_results.append((auroc, auprc, precision, recall, f1, test_loss, test_loss_anomaly))
+            print(f'Epoch {epoch+1}: Training Loss = {train_loss:.4f}, Validation loss = {test_loss:.4f}, Validation loss anomaly = {test_loss_anomaly:.4f}, Validation AUC = {auroc:.4f}, Validation AUPRC = {auprc:.4f}, Precision = {precision:.4f}, Recall = {recall:.4f}, F1 = {f1:.4f}')
+            
+            info_test = 'AD_AUC:{:.4f}, AD_AUPRC:{:.4f}, Test_Loss:{:.4f}, Test_Loss_Anomaly:{:.4f}'.format(auroc, auprc, test_loss, test_loss_anomaly)
 
-train_normal_data, test_normal_data = train_test_split(dataset_normal, test_size=test_size, random_state=random_seed)
-evaluation_data = test_normal_data + dataset_anomaly[:n_test_anomaly]
+            print(info_train + '   ' + info_test)
 
-train_loader = DataLoader(train_normal_data, batch_size=batch_size, shuffle=True)
-test_loader = DataLoader(evaluation_data, batch_size=test_batch_size, shuffle=True)
+            auc = skm.roc_auc_score(y_true_all, y_score_all)
+            
+    return auroc
 
-print(f"Number of samples in the evaluation dataset: {len(evaluation_data)}")
-print(f"Number of test normal data: {len(test_normal_data)}")
-print(f"Number of test anomaly samples: {len(dataset_anomaly[:n_test_anomaly])}")
-print(f"Ratio of test anomaly: {len(dataset_anomaly[:n_test_anomaly]) / len(evaluation_data)}")
+
+#%%
+if __name__ == '__main__':
+    ad_aucs = []
+    
+    for trial in range(n_cross_val):
+        print(f"Starting fold {trial + 1}/{n_cross_val}")
+        ad_auc = run(loaders, meta, random_seed)
+        ad_aucs.append(ad_auc)
+
+    results = 'AUC: {:.2f}+-{:.2f}'.format(np.mean(ad_aucs) * 100, np.std(ad_aucs) * 100)
+    print(len(ad_aucs))
+
+    print('[FINAL RESULTS] ' + results)
+
+    
+#%%
+# '''DATASETS'''
+# if dataset_name == 'AIDS' or dataset_name == 'NCI1' or dataset_name == 'DHFR':
+#     dataset_AN = True
+# else:
+#     dataset_AN = False
+
+# graph_dataset = TUDataset(root=data_root, name=dataset_name).shuffle()
+
+# print(f'Number of graphs: {len(graph_dataset)}')
+# print(f'Number of features: {graph_dataset.num_features}')
+# print(f'Number of edge features: {graph_dataset.num_edge_features}')
+
+# dataset_normal = [data for data in graph_dataset if data.y.item() == 0]
+# dataset_anomaly = [data for data in graph_dataset if data.y.item() == 1]
+
+# print(f"Number of normal samples: {len(dataset_normal)}")
+# print(f"Number of anomaly samples: {len(dataset_anomaly)}")
+
+# train_normal_data, test_normal_data = train_test_split(dataset_normal, test_size=test_size, random_state=random_seed)
+# evaluation_data = test_normal_data + dataset_anomaly[:n_test_anomaly]
+
+# train_loader = DataLoader(train_normal_data, batch_size=batch_size, shuffle=True)
+# test_loader = DataLoader(evaluation_data, batch_size=test_batch_size, shuffle=True)
+
+# print(f"Number of samples in the evaluation dataset: {len(evaluation_data)}")
+# print(f"Number of test normal data: {len(test_normal_data)}")
+# print(f"Number of test anomaly samples: {len(dataset_anomaly[:n_test_anomaly])}")
+# print(f"Ratio of test anomaly: {len(dataset_anomaly[:n_test_anomaly]) / len(evaluation_data)}")
 
 
 #%%
@@ -620,56 +665,56 @@ print(f"Ratio of test anomaly: {len(dataset_anomaly[:n_test_anomaly]) / len(eval
 # print(f"Number of samples in the evaluation dataset: {len(evaluation_data)}")
 
 
-#%%
+# %%
 '''MODEL AND OPTIMIZER DEFINE'''
-num_features = graph_dataset.num_features
-max_nodes = max([graph_dataset[i].num_nodes for i in range(len(graph_dataset))])  # 데이터셋에서 최대 노드 수 계산
-model = GRAPH_AUTOENCODER(num_features, hidden_dims, max_nodes, dropout_rate=dropout_rate).to(device)
-optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay) # L2 regularization
-scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=factor, patience=patience, verbose=True)
+# num_features = graph_dataset.num_features
+# max_nodes = max([graph_dataset[i].num_nodes for i in range(len(graph_dataset))])  # 데이터셋에서 최대 노드 수 계산
+# model = GRAPH_AUTOENCODER(num_features, hidden_dims, max_nodes, dropout_rate=dropout_rate).to(device)
+# optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay) # L2 regularization
+# scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=factor, patience=patience, verbose=True)
 
 
 #%%
-ad_aucs = []
-all_results = []
-for epoch in range(1, epochs+1):
-    train_loss, num_sample, train_cls_outputs = train(model, train_loader, optimizer, max_nodes, device)
+# ad_aucs = []
+# all_results = []
+# for epoch in range(1, epochs+1):
+#     train_loss, num_sample, train_cls_outputs = train(model, train_loader, optimizer, max_nodes, device)
         
-    info_train = 'Epoch {:3d}, Loss {:.4f}'.format(epoch, train_loss)
+#     info_train = 'Epoch {:3d}, Loss {:.4f}'.format(epoch, train_loss)
 
-    if epoch % log_interval == 0:
-        kmeans, cluster_centers = perform_clustering(train_cls_outputs, random_seed, n_clusters=n_cluster)
+#     if epoch % log_interval == 0:
+#         kmeans, cluster_centers = perform_clustering(train_cls_outputs, random_seed, n_clusters=n_cluster)
             
-        auroc, auprc, precision, recall, f1, test_loss, test_loss_anomaly = evaluate_model(model, test_loader, max_nodes, cluster_centers, device)
+#         auroc, auprc, precision, recall, f1, test_loss, test_loss_anomaly = evaluate_model(model, test_loader, max_nodes, cluster_centers, device)
             
-        scheduler.step(train_loss)
+#         scheduler.step(train_loss)
             
-        all_results.append((auroc, auprc, precision, recall, f1, test_loss, test_loss_anomaly))
-        print(f'Epoch {epoch+1}: Training Loss = {train_loss:.4f}, Validation loss = {test_loss:.4f}, Validation loss anomaly = {test_loss_anomaly:.4f}, Validation AUC = {auroc:.4f}, Validation AUPRC = {auprc:.4f}, Precision = {precision:.4f}, Recall = {recall:.4f}, F1 = {f1:.4f}')
-        wandb.log({
-            "epoch": epoch,
-            "train_loss": train_loss,
-            "val_loss": test_loss,
-            "val_loss_anomaly": test_loss_anomaly,
-            "auroc": auroc,
-            "auprc": auprc,
-            "precision": precision,
-            "recall": recall,
-            "f1": f1,
-            "learning_rate": optimizer.param_groups[0]['lr']
-        })
+#         all_results.append((auroc, auprc, precision, recall, f1, test_loss, test_loss_anomaly))
+#         print(f'Epoch {epoch+1}: Training Loss = {train_loss:.4f}, Validation loss = {test_loss:.4f}, Validation loss anomaly = {test_loss_anomaly:.4f}, Validation AUC = {auroc:.4f}, Validation AUPRC = {auprc:.4f}, Precision = {precision:.4f}, Recall = {recall:.4f}, F1 = {f1:.4f}')
+#         wandb.log({
+#             "epoch": epoch,
+#             "train_loss": train_loss,
+#             "val_loss": test_loss,
+#             "val_loss_anomaly": test_loss_anomaly,
+#             "auroc": auroc,
+#             "auprc": auprc,
+#             "precision": precision,
+#             "recall": recall,
+#             "f1": f1,
+#             "learning_rate": optimizer.param_groups[0]['lr']
+#         })
             
-        info_test = 'AD_AUC:{:.4f}, AD_AUPRC:{:.4f}, Test_Loss:{:.4f}, Test_Loss_Anomaly:{:.4f}'.format(auroc, auprc, test_loss, test_loss_anomaly)
+#         info_test = 'AD_AUC:{:.4f}, AD_AUPRC:{:.4f}, Test_Loss:{:.4f}, Test_Loss_Anomaly:{:.4f}'.format(auroc, auprc, test_loss, test_loss_anomaly)
 
-        print(info_train + '   ' + info_test)
+#         print(info_train + '   ' + info_test)
         
-        ad_aucs.append(auroc)
+#         ad_aucs.append(auroc)
 
 
-#%%
-results = 'AUC: {:.2f}+-{:.2f}'.format(np.mean(ad_aucs) * 100, np.std(ad_aucs) * 100)
+# #%%
+# results = 'AUC: {:.2f}+-{:.2f}'.format(np.mean(ad_aucs) * 100, np.std(ad_aucs) * 100)
 
-print('[FINAL RESULTS] ' + results)
+# print('[FINAL RESULTS] ' + results)
 
-wandb.finish()
+# wandb.finish()
 
