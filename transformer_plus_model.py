@@ -266,21 +266,6 @@ class ResidualBlock(nn.Module):
         x = self.dropout(x)
         return F.relu(x + residual)
     
-    
-# class ResidualBlock(nn.Module):
-#     def __init__(self, in_channels, out_channels, dropout_rate=0.1):
-#         super(ResidualBlock, self).__init__()
-#         self.conv = GCNConv(in_channels, out_channels)
-#         self.bn = nn.BatchNorm1d(out_channels)
-#         self.dropout = nn.Dropout(dropout_rate)
-#         self.shortcut = nn.Linear(in_channels, out_channels) if in_channels != out_channels else nn.Identity()
-
-#     def forward(self, x, edge_index):
-#         residual = self.shortcut(x)
-#         x = F.relu(self.bn(self.conv(x, edge_index)))
-#         x = self.dropout(x)
-#         return F.relu(x + residual)
-
 
 class Encoder(nn.Module):
     def __init__(self, num_features, hidden_dims, dropout_rate=0.1):
@@ -622,6 +607,7 @@ scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=factor, patience=pat
 
 
 # %%
+'''RUN'''
 def run(dataset_name, random_seed, dataset_AN, split=None, device=device):
     all_results = []
     set_seed(random_seed)
@@ -664,6 +650,7 @@ def run(dataset_name, random_seed, dataset_AN, split=None, device=device):
 
 
 #%%
+'''MAIN'''
 if __name__ == '__main__':
     ad_aucs = []
     splits = get_ad_split_TU(dataset_name, n_cross_val)    
