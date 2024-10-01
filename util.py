@@ -11,7 +11,7 @@ from torch_geometric.loader import DataLoader
 from torch_geometric.datasets import TUDataset
 from torch_geometric.transforms import Constant
 from sklearn.model_selection import StratifiedKFold
-from torch_geometric.utils import to_dense_adj, to_undirected, to_networkx
+from torch_geometric.utils import to_dense_adj, to_undirected, to_networkx, to_scipy_sparse_matrix, degree, from_networkx
 
 import networkx as nx
 
@@ -304,7 +304,6 @@ def get_data_loaders_TU(dataset_name, batch_size, test_batch_size, split, datase
     dataloader_test = DataLoader(data_test, batch_size, shuffle=True)
     meta = {'num_feat':dataset_num_features, 'num_train':len(data_train), 'num_test':len(data_test), 'num_edge_feat':0, 'max_nodes':max_nodes}
     loader_dict = {'train': dataloader, 'test': dataloader_test}
-
     return loader_dict, meta
 
 
@@ -394,6 +393,7 @@ def read_graph_file(dataset_name, path):
 
 
 def get_ad_dataset_Tox21(dataset_name, batch_size, test_batch_size, need_str_enc=False):
+    set_seed(1)
     path = osp.join(osp.dirname(osp.realpath(__file__)), 'dataset')
 
     data_train_ = read_graph_file(dataset_name + '_training', path)
@@ -422,11 +422,12 @@ def get_ad_dataset_Tox21(dataset_name, batch_size, test_batch_size, need_str_enc
     #     data_train = init_structural_encoding(data_train, rw_dim=args.rw_dim, dg_dim=args.dg_dim)
     #     data_test = init_structural_encoding(data_test, rw_dim=args.rw_dim, dg_dim=args.dg_dim)
 
-    dataloader = DataLoader(data_train, batch_size=batch_size, shuffle=True)
-    dataloader_test = DataLoader(data_test, batch_size=test_batch_size, shuffle=True)
+    dataloader = DataLoader(data_train, batch_size, shuffle=True)
+    dataloader_test = DataLoader(data_test, batch_size, shuffle=True)
     meta = {'num_feat':dataset_num_features, 'num_train':len(data_train), 'max_nodes': max_nodes}
-
-    return dataloader, dataloader_test, meta
+    loader_dict = {'train': dataloader, 'test': dataloader_test}
+    
+    return loader_dict, meta
 
 
 # %%

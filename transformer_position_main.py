@@ -127,12 +127,12 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
                 min_distance = distances.min()  # 가장 가까운 클러스터까지의 거리
 
                 # recon_error = node_loss.item() * 0.1 + adj_loss.item() * 1 + min_distance * 0.5
-                recon_error = node_loss.item() * 0.3 + adj_loss.item() * 0.025 + min_distance * 0.25
+                recon_error = node_loss.item() * 0.3 + adj_loss.item() * 0.025 + min_distance * 0.5
                 recon_errors.append(recon_error.item())
                 
                 print(f'test_node_loss: {node_loss.item() * 0.3 }')
                 print(f'test_adj_loss: {adj_loss.item() * 0.025}')
-                print(f'test_min_distance: {min_distance * 0.25 }')
+                print(f'test_min_distance: {min_distance * 0.5 }')
 
                 if data.y[i].item() == 0:
                     total_loss_ += recon_error
