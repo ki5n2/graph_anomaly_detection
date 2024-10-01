@@ -20,7 +20,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch_geometric.loader import DataLoader
 from torch_geometric.datasets import TUDataset
 from torch_geometric.data import Data, DataLoader, Batch
-from torch_geometric.utils import to_dense_adj, to_dense_batch
+from torch_geometric.utils import to_dense_adj, to_dense_batch, add_self_loops
 from torch.optim.lr_scheduler import CosineAnnealingLR, ExponentialLR, OneCycleLR
 from torch_geometric.nn import GCNConv, global_mean_pool, global_max_pool, global_add_pool
 
@@ -33,8 +33,11 @@ from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
 from functools import partial
 from multiprocessing import Pool
 
-from module.loss import info_nce_loss, Triplet_loss, loss_cal
-from util import set_seed, set_device, EarlyStopping, get_ad_split_TU, get_data_loaders_TU, adj_original, batch_nodes_subgraphs
+from module.loss import loss_cal
+from util import set_seed, set_device, EarlyStopping, read_graph_file, get_ad_dataset_Tox21, adj_original, batch_nodes_subgraphs
+
+import os.path as osp
+import networkx as nx
 
 
 #%%
@@ -68,11 +71,11 @@ def train(model, train_loader, optimizer, max_nodes, device):
             adj_loss = adj_loss / 20
             print(f'train_adj_loss: {adj_loss}')
             
-            z_node_loss = torch.norm(z_tilde[start_node:end_node] - z_[start_node:end_node], p='fro')**2 / num_nodes
-            z_node_loss = z_node_loss * 0.3
-            print(f'train_z_node loss: {z_node_loss}')
+            # z_node_loss = torch.norm(z_tilde[start_node:end_node] - z_[start_node:end_node], p='fro')**2 / num_nodes
+            # z_node_loss = z_node_loss * 0.3
+            # print(f'train_z_node loss: {z_node_loss}')
             
-            loss += node_loss + adj_loss + z_node_loss
+            loss += node_loss + adj_loss
 
             start_node = end_node
 
@@ -89,8 +92,10 @@ def train(model, train_loader, optimizer, max_nodes, device):
 '''EVALUATION'''
 def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
     model.eval()
-    total_loss = 0
-    total_loss_anomaly = 0
+    total_loss_ = 0
+    total_loss_anomaly_ = 0
+    total_loss_mean = 0
+    total_loss_anomaly_mean = 0
 
     all_labels = []
     all_scores = []
@@ -123,12 +128,12 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
                 min_distance = distances.min()  # 가장 가까운 클러스터까지의 거리
 
                 # recon_error = node_loss.item() * 0.1 + adj_loss.item() * 1 + min_distance * 0.5
-                recon_error = node_loss.item() * 0.3 + adj_loss.item() * 0.025 + min_distance * 0.25
+                recon_error = node_loss.item() * 0.3 + adj_loss.item() * 0.025 + min_distance * 0.5
                 recon_errors.append(recon_error.item())
                 
                 print(f'test_node_loss: {node_loss.item() * 0.3}')
                 print(f'test_adj_loss: {adj_loss.item() * 0.025}')
-                print(f'test_min_distance: {min_distance * 0.25}')
+                print(f'test_min_distance: {min_distance * 0.5}')
 
                 if data.y[i].item() == 0:
                     total_loss += recon_error
@@ -137,6 +142,12 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
 
                 start_node = end_node
 
+            total_loss = total_loss_ / sum(data.y == 0)
+            total_loss_anomaly = total_loss_anomaly_ / sum(data.y == 1)
+            
+            total_loss_mean += total_loss
+            total_loss_anomaly_mean += total_loss_anomaly
+            
             all_scores.extend(recon_errors)
             all_labels.extend(data.y.cpu().numpy())
 
@@ -157,14 +168,14 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
     recall = recall_score(all_labels, pred_labels)
     f1 = f1_score(all_labels, pred_labels)
 
-    return auroc, auprc, precision, recall, f1, total_loss / len(test_loader), total_loss_anomaly / len(test_loader)
+    return auroc, auprc, precision, recall, f1, total_loss_mean / len(test_loader), total_loss_anomaly_mean / len(test_loader)
 
 
 #%%
 '''ARGPARSER'''
 parser = argparse.ArgumentParser()
 
-parser.add_argument("--dataset-name", type=str, default='Tox21_p53_training')
+parser.add_argument("--dataset-name", type=str, default='Tox21_p53')
 parser.add_argument("--data-root", type=str, default='./dataset')
 parser.add_argument("--assets-root", type=str, default="./assets")
 
@@ -173,7 +184,7 @@ parser.add_argument("--patience", type=int, default=5)
 parser.add_argument("--n-cluster", type=int, default=5)
 parser.add_argument("--n-cross-val", type=int, default=5)
 parser.add_argument("--random-seed", type=int, default=0)
-parser.add_argument("--log_interval", type=int, default=5)
+parser.add_argument("--log-interval", type=int, default=5)
 parser.add_argument("--batch-size", type=int, default=300)
 parser.add_argument("--n-test-anomaly", type=int, default=400)
 parser.add_argument("--test-batch-size", type=int, default=9999)
@@ -183,7 +194,7 @@ parser.add_argument("--factor", type=float, default=0.5)
 parser.add_argument("--step-size", type=int, default=20)
 parser.add_argument("--test-size", type=float, default=0.25)
 parser.add_argument("--dropout-rate", type=float, default=0.1)
-parser.add_argument("--weight-decay", type=float, default=0.00001)
+parser.add_argument("--weight-decay", type=float, default=0.001)
 parser.add_argument("--learning-rate", type=float, default=0.0001)
 
 parser.add_argument("--dataset-AN", action="store_false")
@@ -290,15 +301,25 @@ class Encoder(nn.Module):
             x = self.dropout(x)
         return F.normalize(x, p=2, dim=1)
 
-
+    
 class FeatureDecoder(nn.Module):
-    def __init__(self, embed_dim, num_features):
+    def __init__(self, embed_dim, num_features, dropout_rate=0.1):
         super(FeatureDecoder, self).__init__()
         self.fc1 = nn.Linear(embed_dim, embed_dim//2)
         self.fc2 = nn.Linear(embed_dim//2, num_features)
+        self.dropout = nn.Dropout(dropout_rate)
+        self.leaky_relu = nn.LeakyReLU(0.1)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.init.xavier_uniform_(self.fc1.weight)
+        nn.init.zeros_(self.fc1.bias)
+        nn.init.xavier_uniform_(self.fc2.weight)
+        nn.init.zeros_(self.fc2.bias)
 
     def forward(self, z):
-        z = self.fc1(z)
+        z = self.leaky_relu(self.fc1(z))
+        z = self.dropout(z)
         z = self.fc2(z)
         return z
 
@@ -363,7 +384,7 @@ class TransformerEncoder_(nn.Module):
 class TransformerEncoder(nn.Module):
     def __init__(self, d_model, nhead, num_layers, dim_feedforward, dropout=0.1):
         super(TransformerEncoder, self).__init__()
-        encoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation='relu')
+        encoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation='relu', batch_first=True)
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers)
         self.d_model = d_model
 
@@ -416,6 +437,8 @@ class GRAPH_AUTOENCODER(nn.Module):
         self.apply(self._init_weights)
 
     def forward(self, x, edge_index, batch, num_graphs):
+        edge_index, _ = add_self_loops(edge_index, num_nodes=x.size(0))
+        
         z_ = self.encoder(x, edge_index)
         z = self.dropout(z_)
 
@@ -518,10 +541,38 @@ class GRAPH_AUTOENCODER(nn.Module):
             edge_index_list.append(edge_index)
             start_idx += num_nodes
         return torch.cat(edge_index_list, dim=1)
+
+
+#%% 
+dataloader, dataloader_test, meta = get_ad_dataset_Tox21(dataset_name, batch_size, test_batch_size)
+for trial in range(n_cross_val):
+    set_seed(random_seed)
+    num_features = meta['num_feat']
+    n_train = meta['num_train']
     
+    model = GRAPH_AUTOENCODER(num_features, hidden_dims, max_nodes, dropout_rate=dropout_rate).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+
+    for epoch in range(1, args.num_epoch + 1):
+        model.train()
+        for data in dataloader:
+            data = data.to(device)
+
+        if epoch % args.eval_freq == 0:
+            model.eval()
+            for data in dataloader_test:
+                data
+
+            auc = skm.roc_auc_score(y_true_all, y_score_all)
+
     
 #%%
 '''DATASETS'''
+if dataset_name == 'AIDS' or dataset_name == 'NCI1' or dataset_name == 'DHFR':
+    dataset_AN = True
+else:
+    dataset_AN = False
+
 graph_dataset = TUDataset(root=data_root, name=dataset_name).shuffle()
 
 print(f'Number of graphs: {len(graph_dataset)}')
@@ -575,7 +626,7 @@ num_features = graph_dataset.num_features
 max_nodes = max([graph_dataset[i].num_nodes for i in range(len(graph_dataset))])  # 데이터셋에서 최대 노드 수 계산
 model = GRAPH_AUTOENCODER(num_features, hidden_dims, max_nodes, dropout_rate=dropout_rate).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay) # L2 regularization
-scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=factor, patience=patience, verbose=True)
+scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=factor, patience=patience, verbose=True)
 
 
 #%%
