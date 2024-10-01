@@ -25,14 +25,13 @@ from torch_geometric.nn import GCNConv, global_mean_pool, global_max_pool, globa
 
 from sklearn.cluster import KMeans
 from scipy.spatial.distance import cdist
-from scipy.stats import wasserstein_distance
 from sklearn.metrics import auc, roc_curve, precision_score, recall_score, f1_score, precision_recall_curve
 from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
 
 from functools import partial
 from multiprocessing import Pool
 
-from module.loss import info_nce_loss, Triplet_loss, loss_cal
+from module.loss import loss_cal
 from util import set_seed, set_device, EarlyStopping, get_ad_split_TU, get_data_loaders_TU, adj_original, batch_nodes_subgraphs
 
 
@@ -59,20 +58,20 @@ def train(model, train_loader, optimizer, max_nodes, device):
             end_node = start_node + num_nodes
 
             node_loss = torch.norm(x_recon[start_node:end_node] - x[start_node:end_node], p='fro')**2 / num_nodes
-            node_loss = node_loss * 0.3
+            node_loss = node_loss * 0.03
             print(f'train_node loss: {node_loss}')
             
             # Adjacency reconstruction loss
             adj_loss = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2 / num_nodes
-            adj_loss = adj_loss / 20
+            adj_loss = adj_loss / 200
             print(f'train_adj_loss: {adj_loss}')
             
             z_node_loss = torch.norm(z_tilde[start_node:end_node] - z_[start_node:end_node], p='fro')**2 / num_nodes
-            # z_node_loss = z_node_loss * 0.3
+            z_node_loss = z_node_loss * 0.1
             print(f'train_z_node loss: {z_node_loss}')
             
             loss += node_loss + adj_loss + z_node_loss
-
+            
             start_node = end_node
 
         num_sample += num_graphs
@@ -138,7 +137,10 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
             
             total_loss = total_loss_ / sum(data.y == 0)
             total_loss_anomaly = total_loss_anomaly_ / sum(data.y == 1)
-                
+            
+            total_loss_mean += total_loss
+            total_loss_anomaly_mean += total_loss_anomaly
+            
             all_scores.extend(recon_errors)
             all_labels.extend(data.y.cpu().numpy())
 
@@ -159,7 +161,7 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
     recall = recall_score(all_labels, pred_labels)
     f1 = f1_score(all_labels, pred_labels)
 
-    return auroc, auprc, precision, recall, f1, total_loss, total_loss
+    return auroc, auprc, precision, recall, f1, total_loss_mean / len(test_loader), total_loss_anomaly_mean / len(test_loader)
 
 
 #%%
