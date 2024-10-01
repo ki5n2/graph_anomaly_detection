@@ -58,19 +58,19 @@ def train(model, train_loader, optimizer, max_nodes, device):
             end_node = start_node + num_nodes
 
             node_loss = torch.norm(x_recon[start_node:end_node] - x[start_node:end_node], p='fro')**2 / num_nodes
-            node_loss = node_loss * 0.03
+            node_loss = node_loss * 0.3
             print(f'train_node loss: {node_loss}')
             
             # Adjacency reconstruction loss
             adj_loss = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2 / num_nodes
-            adj_loss = adj_loss / 200
+            adj_loss = adj_loss / 20
             print(f'train_adj_loss: {adj_loss}')
             
-            z_node_loss = torch.norm(z_tilde[start_node:end_node] - z_[start_node:end_node], p='fro')**2 / num_nodes
-            z_node_loss = z_node_loss * 0.1
-            print(f'train_z_node loss: {z_node_loss}')
+            # z_node_loss = torch.norm(z_tilde[start_node:end_node] - z_[start_node:end_node], p='fro')**2 / num_nodes
+            # z_node_loss = z_node_loss * 0.3
+            # print(f'train_z_node loss: {z_node_loss}')
             
-            loss += node_loss + adj_loss + z_node_loss
+            loss += node_loss + adj_loss
             
             start_node = end_node
 
@@ -89,6 +89,8 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
     model.eval()
     total_loss_ = 0
     total_loss_anomaly_ = 0
+    total_loss_mean = 0
+    total_loss_anomaly_mean = 0
 
     all_labels = []
     all_scores = []
@@ -178,7 +180,7 @@ parser.add_argument("--n-cluster", type=int, default=5)
 parser.add_argument("--n-cross-val", type=int, default=5)
 parser.add_argument("--random-seed", type=int, default=0)
 parser.add_argument("--batch-size", type=int, default=300)
-parser.add_argument("--log_interval", type=int, default=2)
+parser.add_argument("--log_interval", type=int, default=5)
 parser.add_argument("--n-test-anomaly", type=int, default=400)
 parser.add_argument("--test-batch-size", type=int, default=128)
 parser.add_argument("--hidden-dims", nargs='+', type=int, default=[256, 128])
@@ -187,7 +189,7 @@ parser.add_argument("--factor", type=float, default=0.5)
 parser.add_argument("--step-size", type=int, default=20)
 parser.add_argument("--test-size", type=float, default=0.25)
 parser.add_argument("--dropout-rate", type=float, default=0.1)
-parser.add_argument("--weight-decay", type=float, default=0.00001)
+parser.add_argument("--weight-decay", type=float, default=0.001)
 parser.add_argument("--learning-rate", type=float, default=0.0001)
 
 parser.add_argument("--dataset-AN", action="store_false")
@@ -238,6 +240,7 @@ os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
 
 # %%
+'''MODEL CONSTRUCTION'''
 class ResidualBlock(nn.Module):
     def __init__(self, in_channels, out_channels, dropout_rate=0.1):
         super(ResidualBlock, self).__init__()
@@ -295,17 +298,39 @@ class Encoder(nn.Module):
         return F.normalize(x, p=2, dim=1)
 
 
+# class FeatureDecoder(nn.Module):
+#     def __init__(self, embed_dim, num_features, bias=True):
+#         super(FeatureDecoder, self).__init__()
+#         self.fc1 = nn.Linear(embed_dim, embed_dim//2, bias=bias)
+#         self.fc2 = nn.Linear(embed_dim//2, num_features, bias=bias)
+
+#     def forward(self, z):
+#         z = F.relu(self.fc1(z))
+#         z = self.fc2(z)
+#         return z
+
+
 class FeatureDecoder(nn.Module):
-    def __init__(self, embed_dim, num_features, bias=True):
+    def __init__(self, embed_dim, num_features, dropout_rate=0.1):
         super(FeatureDecoder, self).__init__()
-        self.fc1 = nn.Linear(embed_dim, embed_dim//2, bias=bias)
-        self.fc2 = nn.Linear(embed_dim//2, num_features, bias=bias)
+        self.fc1 = nn.Linear(embed_dim, embed_dim//2)
+        self.fc2 = nn.Linear(embed_dim//2, num_features)
+        self.dropout = nn.Dropout(dropout_rate)
+        self.leaky_relu = nn.LeakyReLU(0.1)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.init.xavier_uniform_(self.fc1.weight)
+        nn.init.zeros_(self.fc1.bias)
+        nn.init.xavier_uniform_(self.fc2.weight)
+        nn.init.zeros_(self.fc2.bias)
 
     def forward(self, z):
-        z = F.relu(self.fc1(z))
+        z = self.leaky_relu(self.fc1(z))
+        z = self.dropout(z)
         z = self.fc2(z)
         return z
-
+    
 
 class BilinearEdgeDecoder(nn.Module):
     def __init__(self, max_nodes):
@@ -428,7 +453,7 @@ def perform_clustering(train_cls_outputs, random_seed, n_clusters):
     cls_outputs_np = cls_outputs_tensor.detach().cpu().numpy()
 
     # K-Means 클러스터링 수행
-    kmeans = KMeans(n_clusters=n_clusters, random_state=random_seed, n_init= 10).fit(cls_outputs_np)
+    kmeans = KMeans(n_clusters=n_clusters, random_state=random_seed, n_init="auto").fit(cls_outputs_np)
 
     # 클러스터 중심 저장
     cluster_centers = kmeans.cluster_centers_
@@ -571,7 +596,11 @@ class GRAPH_AUTOENCODER(nn.Module):
 
 #%%
 '''DATASETS'''
-dataset_AN = False
+if dataset_name == 'AIDS' or dataset_name == 'NCI1' or dataset_name == 'DHFR':
+    dataset_AN = True
+else:
+    dataset_AN = False
+
 splits = get_ad_split_TU(dataset_name, n_cross_val)
 loaders, meta = get_data_loaders_TU(dataset_name, batch_size, test_batch_size, splits[0], dataset_AN)
 num_train = meta['num_train']
