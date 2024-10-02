@@ -52,9 +52,9 @@ def train(model, train_loader, optimizer, max_nodes, device):
         x, edge_index, batch, num_graphs = data.x, data.edge_index, data.batch, data.num_graphs
 
         adj = adj_original(edge_index, batch, max_nodes)
-        print(f'adj: {adj[0][:7,:7]}')
+        # print(f'adj: {adj[0][:7,:7]}')
         x_recon, adj_recon_list, train_cls_outputs, z_, z_tilde = model(x, edge_index, batch, num_graphs)
-        print(f'adj_recon: {adj_recon_list[0][:7,:7]}')
+        # print(f'adj_recon: {adj_recon_list[0][:7,:7]}')
         
         loss = 0
         start_node = 0
@@ -64,12 +64,12 @@ def train(model, train_loader, optimizer, max_nodes, device):
 
             node_loss = torch.norm(x_recon[start_node:end_node] - x[start_node:end_node], p='fro')**2 / num_nodes
             node_loss = node_loss * 0.3
-            print(f'train_node loss: {node_loss}')
+            # print(f'train_node loss: {node_loss}')
             
             # Adjacency reconstruction loss
             adj_loss = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2 / num_nodes
             adj_loss = adj_loss / 20
-            print(f'train_adj_loss: {adj_loss}')
+            # print(f'train_adj_loss: {adj_loss}')
             
             # z_node_loss = torch.norm(z_tilde[start_node:end_node] - z_[start_node:end_node], p='fro')**2 / num_nodes
             # z_node_loss = z_node_loss * 0.3
@@ -131,14 +131,14 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
                 recon_error = node_loss.item() * 0.3 + adj_loss.item() * 0.025 + min_distance * 0.5
                 recon_errors.append(recon_error.item())
                 
-                print(f'test_node_loss: {node_loss.item() * 0.3}')
-                print(f'test_adj_loss: {adj_loss.item() * 0.025}')
-                print(f'test_min_distance: {min_distance * 0.5}')
+                # print(f'test_node_loss: {node_loss.item() * 0.3}')
+                # print(f'test_adj_loss: {adj_loss.item() * 0.025}')
+                # print(f'test_min_distance: {min_distance * 0.5}')
 
                 if data.y[i].item() == 0:
-                    total_loss += recon_error
+                    total_loss_ += recon_error
                 else:
-                    total_loss_anomaly += recon_error
+                    total_loss_anomaly_ += recon_error
 
                 start_node = end_node
 
@@ -182,7 +182,7 @@ parser.add_argument("--assets-root", type=str, default="./assets")
 parser.add_argument("--epochs", type=int, default=300)
 parser.add_argument("--patience", type=int, default=5)
 parser.add_argument("--n-cluster", type=int, default=5)
-parser.add_argument("--n-cross-val", type=int, default=5)
+parser.add_argument("--n-cross-val", type=int, default=1)
 parser.add_argument("--random-seed", type=int, default=0)
 parser.add_argument("--log-interval", type=int, default=5)
 parser.add_argument("--batch-size", type=int, default=2000)
@@ -351,7 +351,7 @@ def perform_clustering(train_cls_outputs, random_seed, n_clusters):
     cls_outputs_np = cls_outputs_tensor.detach().cpu().numpy()
 
     # K-Means 클러스터링 수행
-    kmeans = KMeans(n_clusters=n_clusters, random_state=random_seed).fit(cls_outputs_np)
+    kmeans = KMeans(n_clusters=n_clusters, random_state=random_seed, n_init="auto").fit(cls_outputs_np)
 
     # 클러스터 중심 저장
     cluster_centers = kmeans.cluster_centers_
@@ -368,7 +368,7 @@ class GRAPH_AUTOENCODER(nn.Module):
         self.transformer_encoder = TransformerEncoder(
             d_model=hidden_dims[-1],
             nhead=8,
-            num_layers=2,
+            num_layers=4,
             dim_feedforward=hidden_dims[-1] * 4,
             dropout=dropout_rate
         )
@@ -542,8 +542,6 @@ def run(loaders, meta, random_seed, device=device):
 
             print(info_train + '   ' + info_test)
 
-            auc = skm.roc_auc_score(y_true_all, y_score_all)
-            
     return auroc
 
 
@@ -617,7 +615,7 @@ if __name__ == '__main__':
 
 
 # %%
-'''MODEL AND OPTIMIZER DEFINE'''
+# '''MODEL AND OPTIMIZER DEFINE'''
 # num_features = graph_dataset.num_features
 # max_nodes = max([graph_dataset[i].num_nodes for i in range(len(graph_dataset))])  # 데이터셋에서 최대 노드 수 계산
 # model = GRAPH_AUTOENCODER(num_features, hidden_dims, max_nodes, dropout_rate=dropout_rate).to(device)
