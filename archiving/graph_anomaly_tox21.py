@@ -18,9 +18,9 @@ from torch_geometric.nn import global_max_pool
 from sklearn.metrics import auc, roc_curve
 from sklearn.model_selection import train_test_split
 
-from module.model import GRAPH_AUTOENCODER
+# from module.model import GRAPH_AUTOENCODER
 from module.loss import Triplet_loss, loss_cal
-from module.utils import set_device
+from util import set_seed
     
 
 #%%
@@ -173,17 +173,6 @@ pretrained: bool = args.pretrained
 # device = torch.device('cpu')
 device = set_device()
 
-wandb.init(project="graph anomaly detection", entity="ki5n2")
-
-wandb.config.update(args)
-
-wandb.config = {
-  "random_seed": random_seed,
-  "n_test_anomaly": n_test_anomaly,
-  "learning_rate": 0.0001,
-  "epochs": 100
-}
-
 device = set_device()
 print(f"Using device: {device}")
 
@@ -196,7 +185,7 @@ os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
     
 #%%
 '''DATASETS'''
-graph_dataset = TUDataset(root='./dataset/data', name='Tox21_HSE_training')
+graph_dataset = TUDataset(root='./dataset/data', name='Tox21_HSE_testing')
 graph_dataset = graph_dataset.shuffle()
 
 print(f'Number of graphs: {len(graph_dataset)}')
@@ -219,7 +208,6 @@ print(f"Number of samples in the evaluation dataset: {len(evaluation_data)}")
 print(f"Number of test normal data: {len(test_normal_data)}")
 print(f"Number of test anomaly samples: {len(dataset_anomaly[:n_test_anomaly])}")
 print(f"Ratio of test anomaly: {len(dataset_anomaly[:n_test_anomaly]) / len(evaluation_data)}")
-
 
 #%%
 '''MODEL AND OPTIMIZER DEFINE'''

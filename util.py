@@ -1,5 +1,6 @@
 import re
 import os
+
 import torch
 import random
 import numpy as np
@@ -34,6 +35,14 @@ def set_device():
         device = "cpu"
 
     return device
+
+
+def node_iter(G):
+    return G.nodes
+
+
+def node_dict(G):
+    return G.nodes
 
 
 def randint_exclude(data, start_node, end_node):
@@ -354,7 +363,9 @@ def read_graph_file(dataset_name, path):
                 label_vals.append(val)
             graph_labels.append(val)
 
-    label_map_to_int = {val: i for i, val in enumerate(label_vals)}
+    # 수정해줘야 함, 데이터 셋에 따라 라벨 맵핑 순서가 바뀜
+    label_map_to_int = {0: 0, 1: 1}
+    # label_map_to_int = {val: i for i, val in enumerate(label_vals)}
     graph_labels = np.array([label_map_to_int[l] for l in graph_labels])
 
     filename_adj = prefix + '_A.txt'
@@ -375,22 +386,27 @@ def read_graph_file(dataset_name, path):
     for i in range(1, 1 + len(adj_list)):
         G = nx.from_edgelist(adj_list[i])
         G.graph['label'] = graph_labels[i - 1]
+        for u in node_iter(G):
+            if len(node_labels) > 0:
+                node_label_one_hot = [0] * num_unique_node_labels
+                node_label = node_labels[u - 1]
+                node_label_one_hot[node_label] = 1
+                node_dict(G)[u]['label'] = node_label_one_hot
+            if len(node_attrs) > 0:
+                node_dict(G)[u]['feat'] = node_attrs[u - 1]
+        if len(node_attrs) > 0:
+            G.graph['feat_dim'] = node_attrs[0].shape[0]
 
         mapping = {}
         it = 0
-        for n in G.nodes:
+        for n in node_iter(G):
             mapping[n] = it
             it += 1
 
-        G_pyg = from_networkx(nx.relabel_nodes(G, mapping))
-        G_pyg.y = G.graph['label']
-        G_pyg.x = torch.ones((G_pyg.num_nodes,1))
-
-        if G_pyg.num_nodes > 0:
-            graphs.append(G_pyg)
-
+        # graphs.append(nx.relabel_nodes(G, mapping))
+        graphs.append(from_networkx(nx.relabel_nodes(G, mapping)))
+                
     return graphs
-
 
 def get_ad_dataset_Tox21(dataset_name, batch_size, test_batch_size, need_str_enc=False):
     set_seed(1)
@@ -399,29 +415,32 @@ def get_ad_dataset_Tox21(dataset_name, batch_size, test_batch_size, need_str_enc
     data_train_ = read_graph_file(dataset_name + '_training', path)
     data_test = read_graph_file(dataset_name + '_testing', path)
 
-    dataset_num_features = data_train_[0].num_features
-
-    data_train = []
+    dataset_num_features = data_train_[0].label.shape[1]
+    
+    data_train = [] # 0이 정상, 1이 이상
     for data in data_train_:
-        if data.y == 1:
+        if getattr(data, 'graph_label', None) == 0:  # 'graph_label'이 1인 데이터 확인
+            data.y = data.graph_label  # 'graph_label'을 'y'로 변경
+            data.x = data.label  # 'label'을 'x'로 변경
+            del data.graph_label  # 기존 'graph_label' 삭제
+            del data.label  # 기존 'label' 삭제
             data_train.append(data)
 
-    idx = 0
-    for data in data_train:
-        data.y = 0
-        data['idx'] = idx
-        idx += 1
-
     for data in data_test:
-        data.y = 1 if data.y == 1 else 0
+        data.y = data.graph_label  # 'graph_label'을 'y'로 변경
+        data.x = data.label  # 'label'을 'x'로 변경
+        del data.graph_label  # 기존 'graph_label' 삭제
+        del data.label  # 기존 'label' 삭제
+    
+    # a= []
+    # for i in range(len(data_test)):
+    #     if data_test[i].y == 0:
+    #         a.append(data_test[i].y)
+    # len(a)
     
     data_ = data_train + data_test
     max_nodes = max([data_[i].num_nodes for i in range(len(data_))])
     
-    # if need_str_enc:
-    #     data_train = init_structural_encoding(data_train, rw_dim=args.rw_dim, dg_dim=args.dg_dim)
-    #     data_test = init_structural_encoding(data_test, rw_dim=args.rw_dim, dg_dim=args.dg_dim)
-
     dataloader = DataLoader(data_train, batch_size, shuffle=True)
     dataloader_test = DataLoader(data_test, batch_size, shuffle=True)
     meta = {'num_feat':dataset_num_features, 'num_train':len(data_train), 'max_nodes': max_nodes}
