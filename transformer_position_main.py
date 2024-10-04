@@ -120,11 +120,10 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
                 # Adjacency reconstruction error
                 adj_loss = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2 / num_nodes
                 
-                # 클러스터 중심과의 거리 계산
                 # cls_vec = e_cls_output[i].cpu().numpy()  # [hidden_dim]
                 cls_vec = e_cls_output[i].detach().cpu().numpy()  # [hidden_dim]
                 distances = cdist([cls_vec], cluster_centers, metric='euclidean')  # [1, n_clusters]
-                min_distance = distances.min()  # 가장 가까운 클러스터까지의 거리
+                min_distance = distances.min() 
 
                 # recon_error = node_loss.item() * 0.1 + adj_loss.item() * 1 + min_distance * 0.5
                 recon_error = node_loss.item() * 0.3 + adj_loss.item() * 0.025 + min_distance * 0.5
@@ -368,8 +367,7 @@ class GraphBertPositionalEncoding(nn.Module):
         
         spl_matrix = torch.full((num_nodes, self.max_nodes), self.max_nodes)
         
-        # 모든 쌍의 최단 경로를 한 번에 계산
-        lengths = dict(nx.all_pairs_shortest_path_length(G))
+        lengths = dict(nx.all_pairs_shortest_path_length(G))        # 모든 쌍의 최단 경로를 한 번에 계산
         
         for i in lengths:
             for j, length in lengths[i].items():
@@ -381,17 +379,14 @@ class GraphBertPositionalEncoding(nn.Module):
         return wsp_matrix
     
     def get_laplacian_encoding(self, edge_index, num_nodes):
-        # Laplacian Eigenvector 계산
         edge_index, edge_weight = get_laplacian(edge_index, normalization='sym', 
                                             num_nodes=num_nodes)
         L = torch.sparse_coo_tensor(edge_index, edge_weight, 
                                 (num_nodes, num_nodes)).to_dense()
         
-        # CUDA 텐서를 CPU로 이동 후 NumPy로 변환
         L_np = L.cpu().numpy()
         eigenvals, eigenvecs = eigh(L_np)
         
-        # 결과를 다시 텐서로 변환하고 원래 디바이스로 이동
         le_matrix = torch.from_numpy(eigenvecs).float().to(edge_index.device)
         
         padded_le = torch.zeros((num_nodes, self.max_nodes), device=edge_index.device)
@@ -400,15 +395,12 @@ class GraphBertPositionalEncoding(nn.Module):
         return padded_le
     
     def forward(self, edge_index, num_nodes):
-        # WSP 인코딩
         wsp_matrix = self.get_wsp_encoding(edge_index, num_nodes)
         wsp_encoding = self.wsp_encoder(wsp_matrix)
         
-        # LE 인코딩
         le_matrix = self.get_laplacian_encoding(edge_index, num_nodes)
         le_encoding = self.le_encoder(le_matrix)
         
-        # WSP와 LE 결합
         pos_encoding = torch.cat([wsp_encoding, le_encoding], dim=-1)
         
         return pos_encoding
@@ -429,21 +421,16 @@ class TransformerEncoder(nn.Module):
         batch_size = src.size(0)
         max_seq_len = src.size(1)
         
-        # 각 그래프에 대해 포지셔널 인코딩 계산
         pos_encodings = []
         for i in range(batch_size):
-            # CLS 토큰을 위한 더미 인코딩
             cls_pos_encoding = torch.zeros(1, self.d_model).to(src.device)
             
-            # 실제 노드들의 포지셔널 인코딩
             num_nodes = (~src_key_padding_mask[i][1:]).sum().item()
             
-            # 문제 발생 위치
             if num_nodes > 0:
                 graph_pos_encoding = self.positional_encoding( 
                     edge_index_list[i], num_nodes
                 )
-                # 패딩
                 padded_pos_encoding = F.pad(
                     graph_pos_encoding, 
                     (0, 0, 0, max_seq_len - num_nodes - 1), 
@@ -452,17 +439,13 @@ class TransformerEncoder(nn.Module):
             else:
                 padded_pos_encoding = torch.zeros(max_seq_len - 1, self.d_model).to(src.device)
             
-            # CLS 토큰 인코딩과 노드 인코딩 결합
             full_pos_encoding = torch.cat([cls_pos_encoding, padded_pos_encoding], dim=0)
             pos_encodings.append(full_pos_encoding)
         
-        # 모든 배치의 포지셔널 인코딩 결합
         pos_encoding_batch = torch.stack(pos_encodings)
         
-        # 포지셔널 인코딩 추가
         src_ = src + pos_encoding_batch
         
-        # 트랜스포머 인코딩
         src_ = src_.transpose(0, 1)  # [seq_len, batch_size, hidden_dim]
         src_key_padding_mask_ = src_key_padding_mask.transpose(0, 1)
         output = self.transformer_encoder(src_, src_key_padding_mask=src_key_padding_mask_)
@@ -472,14 +455,11 @@ class TransformerEncoder(nn.Module):
     
     
 def perform_clustering(train_cls_outputs, random_seed, n_clusters):
-    # train_cls_outputs가 이미 텐서이므로, 그대로 사용
     cls_outputs_tensor = train_cls_outputs  # [total_num_graphs, hidden_dim]
     cls_outputs_np = cls_outputs_tensor.detach().cpu().numpy()
 
-    # K-Means 클러스터링 수행
     kmeans = KMeans(n_clusters=n_clusters, random_state=random_seed, n_init="auto").fit(cls_outputs_np)
 
-    # 클러스터 중심 저장
     cluster_centers = kmeans.cluster_centers_
 
     return kmeans, cluster_centers
@@ -518,7 +498,6 @@ class GRAPH_AUTOENCODER(nn.Module):
         z_ = self.encoder(x, edge_index)
         z = self.dropout(z_)
 
-        # 그래프별로 노드 임베딩과 엣지 인덱스를 분리
         z_list = [z[batch == i] for i in range(num_graphs)]
         edge_index_list = []
         start_idx = 0
@@ -530,10 +509,8 @@ class GRAPH_AUTOENCODER(nn.Module):
             edge_index_list.append(graph_edges)
             start_idx += num_nodes
 
-        # 각 그래프에 대해 CLS 토큰 추가 및 패딩
         z_with_cls_list = []
         mask_list = []
-        # 최대 노드 수 계산
         max_nodes_in_batch = max(z_graph.size(0) for z_graph in z_list)
         
         for i in range(num_graphs):
@@ -542,46 +519,36 @@ class GRAPH_AUTOENCODER(nn.Module):
             cls_token = cls_token.to(device)
             z_graph = z_list[i].unsqueeze(1)  # [num_nodes, 1, hidden_dim]
             
-            # 패딩
             pad_size = max_nodes_in_batch - num_nodes
             z_graph_padded = F.pad(z_graph, (0, 0, 0, 0, 0, pad_size), 'constant', 0)  # [max_nodes, 1, hidden_dim]
             
-            # CLS 토큰 추가
             z_with_cls = torch.cat([cls_token, z_graph_padded.transpose(0, 1)], dim=1)  # [1, max_nodes+1, hidden_dim]
             z_with_cls_list.append(z_with_cls)
 
-            # 마스크 생성 (True: 패딩된 위치, False: 유효한 위치)
             graph_mask = torch.cat([torch.tensor([False]), torch.tensor([False]*num_nodes + [True]*pad_size)])
             mask_list.append(graph_mask)
 
-        # 배치로 결합
         z_with_cls_batch = torch.cat(z_with_cls_list, dim=0)  # [batch_size, max_nodes+1, hidden_dim]
         mask = torch.stack(mask_list).to(z.device)  # [batch_size, max_nodes+1]
 
         encoded = self.transformer_encoder(z_with_cls_batch, edge_index_list, mask)
 
-        # CLS 토큰과 노드 임베딩 분리
         cls_output = encoded[:, 0, :]       # [batch_size, hidden_dim]
         node_output = encoded[:, 1:, :]     # [batch_size, max_nodes, hidden_dim]
 
-        # 패딩된 노드 무시하고 노드 임베딩 추출
         node_output_list = []
         for i in range(num_graphs):
             num_nodes = z_list[i].size(0)
             node_output_list.append(node_output[i, :num_nodes, :])
 
-        # 노드 임베딩을 이어붙임
         u = torch.cat(node_output_list, dim=0)  # [total_num_nodes, hidden_dim]
         # node_output_concat = torch.cat(node_output_list, dim=0)
 
-        # u에 MLP 적용하여 u' 생성
         u_prime = self.u_mlp(u)
         
-        # 노드 특성 재구성: u'를 사용
         x_recon = self.feature_decoder(u_prime)
         # x_recon = self.feature_decoder(node_output_concat)
                 
-        # 인접행렬 재구성
         adj_recon_list = []
         idx = 0
         for i in range(num_graphs):
