@@ -50,7 +50,7 @@ def train(model, train_loader, optimizer, max_nodes, device):
         optimizer.zero_grad()
         data = data.to(device)
         x, edge_index, batch, num_graphs = data.x, data.edge_index, data.batch, data.num_graphs
-
+        
         adj = adj_original(edge_index, batch, max_nodes)
         # print(f'adj: {adj[0][:7,:7]}')
         x_recon, adj_recon_list, train_cls_outputs, z_, z_tilde = model(x, edge_index, batch, num_graphs)
@@ -179,7 +179,7 @@ parser.add_argument("--dataset-name", type=str, default='Tox21_p53')
 parser.add_argument("--data-root", type=str, default='./dataset')
 parser.add_argument("--assets-root", type=str, default="./assets")
 
-parser.add_argument("--epochs", type=int, default=300)
+parser.add_argument("--epochs", type=int, default=100)
 parser.add_argument("--patience", type=int, default=5)
 parser.add_argument("--n-cluster", type=int, default=5)
 parser.add_argument("--n-cross-val", type=int, default=1)

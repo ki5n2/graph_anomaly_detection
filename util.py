@@ -1,6 +1,5 @@
 import re
 import os
-
 import torch
 import random
 import numpy as np
@@ -238,7 +237,6 @@ def get_ad_split_TU(dataset_name, n_cross_val):
 
     return splits
 
-
 def get_data_loaders_TU(dataset_name, batch_size, test_batch_size, split, dataset_AN):
     path = osp.join(osp.dirname(osp.realpath(__file__)), 'dataset')
     dataset_ = TUDataset(path, name=dataset_name)
@@ -307,7 +305,7 @@ def get_data_loaders_TU(dataset_name, batch_size, test_batch_size, split, datase
     if dataset_AN:
         for data in data_test:
             data.y = 1 if data.y == 0 else 0
-
+    
     max_nodes = max([dataset[i].num_nodes for i in range(len(dataset))])
     dataloader = DataLoader(data_train, batch_size, shuffle=True)
     dataloader_test = DataLoader(data_test, batch_size, shuffle=True)
@@ -363,7 +361,7 @@ def read_graph_file(dataset_name, path):
                 label_vals.append(val)
             graph_labels.append(val)
 
-    # 수정해줘야 함, 데이터 셋에 따라 라벨 맵핑 순서가 바뀜
+    # 수정해줘야 함, 데이터 셋에 따라 다름
     label_map_to_int = {0: 0, 1: 1}
     # label_map_to_int = {val: i for i, val in enumerate(label_vals)}
     graph_labels = np.array([label_map_to_int[l] for l in graph_labels])
@@ -422,6 +420,7 @@ def get_ad_dataset_Tox21(dataset_name, batch_size, test_batch_size, need_str_enc
         if getattr(data, 'graph_label', None) == 0:  # 'graph_label'이 1인 데이터 확인
             data.y = data.graph_label  # 'graph_label'을 'y'로 변경
             data.x = data.label  # 'label'을 'x'로 변경
+            data.x = data.x.float()  
             del data.graph_label  # 기존 'graph_label' 삭제
             del data.label  # 기존 'label' 삭제
             data_train.append(data)
@@ -429,6 +428,7 @@ def get_ad_dataset_Tox21(dataset_name, batch_size, test_batch_size, need_str_enc
     for data in data_test:
         data.y = data.graph_label  # 'graph_label'을 'y'로 변경
         data.x = data.label  # 'label'을 'x'로 변경
+        data.x = data.x.float()  
         del data.graph_label  # 기존 'graph_label' 삭제
         del data.label  # 기존 'label' 삭제
     
