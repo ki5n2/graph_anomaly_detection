@@ -414,6 +414,7 @@ def get_ad_dataset_Tox21(dataset_name, batch_size, test_batch_size, need_str_enc
     data_test = read_graph_file(dataset_name + '_testing', path)
 
     dataset_num_features = data_train_[0].label.shape[1]
+    dataset_num_features_ = data_test[0].label.shape[1]
     
     data_train = [] # 0이 정상, 1이 이상
     for data in data_train_:
@@ -450,3 +451,90 @@ def get_ad_dataset_Tox21(dataset_name, batch_size, test_batch_size, need_str_enc
 
 
 # %%
+def get_ad_dataset_Tox21(dataset_name, batch_size, test_batch_size, need_str_enc=False):
+    set_seed(1)
+    path = osp.join(osp.dirname(osp.realpath(__file__)), 'dataset')
+
+    data_train_ = read_graph_file(dataset_name + '_training', path)
+    
+    dataset_num_features = data_train_[0].label.shape[1]
+    
+    data_train = [] # 0이 정상, 1이 이상
+    data_test = []
+    for data in data_train_:
+        if getattr(data, 'graph_label', None) == 0:  # 'graph_label'이 1인 데이터 확인
+            data.y = data.graph_label  # 'graph_label'을 'y'로 변경
+            data.x = data.label  # 'label'을 'x'로 변경
+            data.x = data.x.float()  
+            del data.graph_label  # 기존 'graph_label' 삭제
+            del data.label  # 기존 'label' 삭제
+            data_train.append(data)
+        elif getattr(data, 'graph_label', None) == 1:
+            data.y = data.graph_label  # 'graph_label'을 'y'로 변경
+            data.x = data.label  # 'label'을 'x'로 변경
+            data.x = data.x.float()  
+            del data.graph_label  # 기존 'graph_label' 삭제
+            del data.label  # 기존 'label' 삭제
+            data_test.append(data)
+    
+    print(len(data_train))            
+    print(len(data_test))
+    
+    if dataset_name == 'Tox21_p53':
+        random_indices_test = random.sample(range(len(data_test)), 28)
+    elif dataset_name == 'Tox21_HSE':
+        random_indices_test = random.sample(range(len(data_test)), 10)
+    elif dataset_name == 'Tox21_MMP':
+        random_indices_test = random.sample(range(len(data_test)), 38)
+
+    # 선택된 인덱스에 해당하는 데이터만 남기기
+    data_test = [data_test[i] for i in random_indices_test]
+
+    # 결과 확인
+    print(f"data_test에 남아 있는 데이터 개수: {len(data_test)}")
+    
+    if dataset_name == 'Tox21_p53':
+        random_indices = random.sample(range(len(data_train)), 241)
+    elif dataset_name == 'Tox21_HSE':
+        random_indices = random.sample(range(len(data_train)), 257)
+    elif dataset_name == 'Tox21_MMP':
+        random_indices = random.sample(range(len(data_train)), 200)
+        
+    # 선택된 인덱스에 해당하는 데이터 가져오기
+    random_sampled_data = [data_train[i] for i in random_indices]
+
+    # data_test에 선택된 100개 데이터 추가
+    data_test.extend(random_sampled_data)
+
+    data_train = [data for i, data in enumerate(data_train) if i not in random_indices]
+
+    # 결과 확인
+    print(f"data_test에 추가된 데이터 개수: {len(random_sampled_data)}")
+    print(f"data_train에서 삭제 후 데이터 개수: {len(data_train)}")
+
+    print(data_test[10])
+    print(data_test[50])
+    print(data_test[100])
+    print(data_test[150])
+    print(data_test[200])
+    # for data in data_test:
+    #     data.y = data.graph_label  # 'graph_label'을 'y'로 변경
+    #     data.x = data.label  # 'label'을 'x'로 변경
+    #     data.x = data.x.float()  
+    #     del data.graph_label  # 기존 'graph_label' 삭제
+    #     del data.label  # 기존 'label' 삭제
+    
+    # a= []
+    # for i in range(len(data_test)):
+    #     if data_test[i].y == 0:
+    #         a.append(data_test[i].y)
+    # len(a)
+    data_ = data_train + data_test
+    max_nodes = max([data_[i].num_nodes for i in range(len(data_))])
+    
+    dataloader = DataLoader(data_train, batch_size, shuffle=True)
+    dataloader_test = DataLoader(data_test, batch_size, shuffle=True)
+    meta = {'num_feat':dataset_num_features, 'num_feat_':dataset_num_features_ ,'num_train':len(data_train), 'max_nodes': max_nodes}
+    loader_dict = {'train': dataloader, 'test': dataloader_test}
+    
+    return loader_dict, meta
