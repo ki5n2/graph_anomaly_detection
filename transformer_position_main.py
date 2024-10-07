@@ -86,7 +86,6 @@ def train(model, train_loader, optimizer, max_nodes, device):
 
     return total_loss / len(train_loader), num_sample, train_cls_outputs.detach().cpu()
 
-
 #%%
 '''EVALUATION'''
 def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
@@ -195,7 +194,11 @@ parser.add_argument("--dropout-rate", type=float, default=0.1)
 parser.add_argument("--weight-decay", type=float, default=0.001)
 parser.add_argument("--learning-rate", type=float, default=0.0001)
 
-parser.add_argument("--dataset-AN", action="store_false")
+parser.add_argument("--alpha", type=float, default=0.3)
+parser.add_argument("--beta", type=float, default=0.025)
+parser.add_argument("--gamma", type=float, default=0.5)
+parser.add_argument("--node-theta", type=float, default=0.03)
+parser.add_argument("--adj-theta", type=int, default=0.005)
 
 try:
     args = parser.parse_args()
@@ -227,7 +230,11 @@ weight_decay: float = args.weight_decay
 dropout_rate: float = args.dropout_rate
 learning_rate: float = args.learning_rate
 
-dataset_AN: bool = args.dataset_AN
+alpha: float = args.alpha
+beta: float = args.beta
+gamma: float = args.gamma
+node_theta: float = args.node_theta
+adj_theta: int = args.adj_theta
 
 set_seed(random_seed)
 
@@ -247,7 +254,7 @@ os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 class ResidualBlock(nn.Module):
     def __init__(self, in_channels, out_channels, dropout_rate=0.1):
         super(ResidualBlock, self).__init__()
-        self.conv = GCNConv(in_channels, out_channels)
+        self.conv = GCNConv(in_channels, out_channels, improved=True, add_self_loops=True, normalize=True)
         self.bn = nn.BatchNorm1d(out_channels)
         self.dropout = nn.Dropout(dropout_rate)
         self.shortcut = nn.Linear(in_channels, out_channels) if in_channels != out_channels else nn.Identity()
@@ -262,12 +269,30 @@ class ResidualBlock(nn.Module):
         if isinstance(self.shortcut, nn.Linear):
             nn.init.xavier_uniform_(self.shortcut.weight, gain=1.0)
             nn.init.zeros_(self.shortcut.bias)
-
+    
     def forward(self, x, edge_index):
         residual = self.shortcut(x)
-        x = F.relu(self.bn(self.conv(x, edge_index)))
+        
+        # 정규화 트릭 적용
+        edge_index, _ = utils.add_self_loops(edge_index, num_nodes=x.size(0))
+        deg = utils.degree(edge_index[0], x.size(0), dtype=x.dtype)
+        deg_inv_sqrt = deg.pow(-0.5)
+        deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
+        norm = deg_inv_sqrt[edge_index[0]] * deg_inv_sqrt[edge_index[1]]
+        
+        # 정규화된 인접 행렬을 사용하여 합성곱 적용
+        x = self.conv(x, edge_index, norm)
+        
+        x = F.relu(self.bn(x))
         x = self.dropout(x)
         return F.relu(x + residual)
+
+    # def forward(self, x, edge_index):
+    #     residual = self.shortcut(x)
+    #     x = self.conv(x, edge_index)  # GCNConv에서 정규화 트릭 적용
+    #     x = F.relu(self.bn(x))
+    #     x = self.dropout(x)
+    #     return F.relu(x + residual)
     
 
 class Encoder(nn.Module):
@@ -326,7 +351,8 @@ class BilinearEdgeDecoder(nn.Module):
         
         return padded_adj
         
-    
+
+#%%
 class GraphBertPositionalEncoding(nn.Module):
     def __init__(self, d_model, max_nodes):
         super().__init__()
@@ -337,26 +363,6 @@ class GraphBertPositionalEncoding(nn.Module):
         self.wsp_encoder = nn.Linear(max_nodes, d_model // 2)
         self.le_encoder = nn.Linear(max_nodes, d_model // 2)
         
-    # def get_wsp_encoding(self, edge_index, num_nodes):
-    #     # Weighted Shortest Path 계산
-    #     edge_index_np = edge_index.cpu().numpy()
-    #     G = nx.Graph()
-    #     G.add_nodes_from(range(num_nodes))
-    #     edges = list(zip(edge_index_np[0], edge_index_np[1]))
-    #     G.add_edges_from(edges)
-        
-    #     spl_matrix = torch.zeros((num_nodes, self.max_nodes))
-    #     for i in range(num_nodes):
-    #         for j in range(num_nodes):
-    #             if i != j:
-    #                 try:
-    #                     path_length = nx.shortest_path_length(G, source=i, target=j)
-    #                 except nx.NetworkXNoPath:
-    #                     path_length = self.max_nodes  # 연결되지 않은 경우 최대 거리 할당
-    #                 spl_matrix[i, j] = path_length
-
-    #     return spl_matrix.to(edge_index.device)
-    
     def get_wsp_encoding(self, edge_index, num_nodes):
         # Weighted Shortest Path 계산
         edge_index_np = edge_index.cpu().numpy()
@@ -365,18 +371,38 @@ class GraphBertPositionalEncoding(nn.Module):
         edges = list(zip(edge_index_np[0], edge_index_np[1]))
         G.add_edges_from(edges)
         
-        spl_matrix = torch.full((num_nodes, self.max_nodes), self.max_nodes)
+        spl_matrix = torch.zeros((num_nodes, self.max_nodes))
+        for i in range(num_nodes):
+            for j in range(num_nodes):
+                if i != j:
+                    try:
+                        path_length = nx.shortest_path_length(G, source=i, target=j)
+                    except nx.NetworkXNoPath:
+                        path_length = self.max_nodes  # 연결되지 않은 경우 최대 거리 할당
+                    spl_matrix[i, j] = path_length
+
+        return spl_matrix.to(edge_index.device)
+    
+    # def get_wsp_encoding(self, edge_index, num_nodes):
+    #     # Weighted Shortest Path 계산
+    #     edge_index_np = edge_index.cpu().numpy() # 인풋: 각 그래프에 대한 엣지 인덱스
+    #     G = nx.Graph()
+    #     G.add_nodes_from(range(num_nodes))
+    #     edges = list(zip(edge_index_np[0], edge_index_np[1]))
+    #     G.add_edges_from(edges)
         
-        lengths = dict(nx.all_pairs_shortest_path_length(G))        # 모든 쌍의 최단 경로를 한 번에 계산
+    #     spl_matrix = torch.full((num_nodes, self.max_nodes), self.max_nodes)
         
-        for i in lengths:
-            for j, length in lengths[i].items():
-                spl_matrix[i, j] = length
+    #     lengths = dict(nx.all_pairs_shortest_path_length(G))        # 모든 쌍의 최단 경로를 한 번에 계산
         
-        wsp_matrix = spl_matrix.to(edge_index.device)
-        wsp_matrix = wsp_matrix.float()
+    #     for i in lengths:
+    #         for j, length in lengths[i].items():
+    #             spl_matrix[i, j] = length
         
-        return wsp_matrix
+    #     wsp_matrix = spl_matrix.to(edge_index.device)
+    #     wsp_matrix = wsp_matrix.float()
+        
+    #     return wsp_matrix
     
     def get_laplacian_encoding(self, edge_index, num_nodes):
         edge_index, edge_weight = get_laplacian(edge_index, normalization='sym', 
@@ -416,13 +442,12 @@ class TransformerEncoder(nn.Module):
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers)
         self.d_model = d_model
 
-
     def forward(self, src, edge_index_list, src_key_padding_mask):
         batch_size = src.size(0)
-        max_seq_len = src.size(1)
+        max_seq_len = src.size(1) # 배치 내 최대 노드 수 일 것임
         
         pos_encodings = []
-        for i in range(batch_size):
+        for i in range(batch_size): # d_model = 128(hidden_dims[-1])
             cls_pos_encoding = torch.zeros(1, self.d_model).to(src.device)
             
             num_nodes = (~src_key_padding_mask[i][1:]).sum().item()
@@ -454,12 +479,93 @@ class TransformerEncoder(nn.Module):
         return output
     
     
+class ImprovedTransformerEncoder(nn.Module):
+    def __init__(self, d_model, nhead, num_layers, dim_feedforward, max_nodes, dropout=0.1):
+        super(ImprovedTransformerEncoder, self).__init__()
+        self.positional_encoding = GraphBertPositionalEncoding(d_model, max_nodes)
+        
+        self.layers = nn.ModuleList([
+            ImprovedTransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout)
+            for _ in range(num_layers)
+        ])
+        
+        self.norm = nn.LayerNorm(d_model)
+        self.d_model = d_model
+
+    def forward(self, src, edge_index_list, src_key_padding_mask):
+        batch_size = src.size(0)
+        max_seq_len = src.size(1)
+        
+        # Calculate positional encodings (same as before)
+        pos_encodings = []
+        for i in range(batch_size):
+            cls_pos_encoding = torch.zeros(1, self.d_model).to(src.device)
+            num_nodes = (~src_key_padding_mask[i][1:]).sum().item()
+            
+            if num_nodes > 0:
+                graph_pos_encoding = self.positional_encoding(edge_index_list[i], num_nodes)
+                padded_pos_encoding = F.pad(
+                    graph_pos_encoding, 
+                    (0, 0, 0, max_seq_len - num_nodes - 1), 
+                    'constant', 0
+                )
+            else:
+                padded_pos_encoding = torch.zeros(max_seq_len - 1, self.d_model).to(src.device)
+            
+            full_pos_encoding = torch.cat([cls_pos_encoding, padded_pos_encoding], dim=0)
+            pos_encodings.append(full_pos_encoding)
+        
+        pos_encoding_batch = torch.stack(pos_encodings)
+        
+        # Add positional encoding
+        src = src + pos_encoding_batch
+        
+        # Apply transformer layers
+        for layer in self.layers:
+            src = layer(src, src_key_padding_mask)
+        
+        # Apply final layer normalization
+        output = self.norm(src)
+        
+        return output
+
+
+class ImprovedTransformerEncoderLayer(nn.Module):
+    def __init__(self, d_model, nhead, dim_feedforward, dropout=0.1):
+        super(ImprovedTransformerEncoderLayer, self).__init__()
+        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+        
+        # Two-layer feed-forward network
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+        
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+        self.activation = nn.GELU()  # Using GELU instead of ReLU
+
+    def forward(self, src, src_key_padding_mask):
+        # Multi-head self-attention
+        src2 = self.self_attn(src, src, src, key_padding_mask=src_key_padding_mask)[0]
+        src = src + self.dropout(src2)
+        src = self.norm1(src)
+        
+        # Feed-forward network
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
+        src = src + self.dropout(src2)
+        src = self.norm2(src)
+        
+        return src
+    
 def perform_clustering(train_cls_outputs, random_seed, n_clusters):
+    # train_cls_outputs가 이미 텐서이므로, 그대로 사용
     cls_outputs_tensor = train_cls_outputs  # [total_num_graphs, hidden_dim]
     cls_outputs_np = cls_outputs_tensor.detach().cpu().numpy()
 
+    # K-Means 클러스터링 수행
     kmeans = KMeans(n_clusters=n_clusters, random_state=random_seed, n_init="auto").fit(cls_outputs_np)
 
+    # 클러스터 중심 저장
     cluster_centers = kmeans.cluster_centers_
 
     return kmeans, cluster_centers
@@ -471,11 +577,11 @@ class GRAPH_AUTOENCODER(nn.Module):
     def __init__(self, num_features, hidden_dims, max_nodes, dropout_rate=0.1):
         super(GRAPH_AUTOENCODER, self).__init__()
         self.encoder= Encoder(num_features, hidden_dims, dropout_rate)
-        self.transformer_encoder = TransformerEncoder(
+        self.transformer_encoder = ImprovedTransformerEncoder(
             d_model=hidden_dims[-1],
-            nhead=8,
-            num_layers=4,
-            dim_feedforward=hidden_dims[-1] * 4,
+            nhead=16,  # Increased from 8 to 16
+            num_layers=6,  # Increased from 4 to 6
+            dim_feedforward=hidden_dims[-1] * 8,  # Increased from 4 to 8
             max_nodes=max_nodes,
             dropout=dropout_rate
         )
@@ -498,8 +604,8 @@ class GRAPH_AUTOENCODER(nn.Module):
         z_ = self.encoder(x, edge_index)
         z = self.dropout(z_)
 
-        z_list = [z[batch == i] for i in range(num_graphs)]
-        edge_index_list = []
+        z_list = [z[batch == i] for i in range(num_graphs)] # 그래프 별 z 저장 (batch_size, num nodes, feature dim)
+        edge_index_list = [] # 그래프 별 엣지 인덱스 저장 (batch_size), edge_index_list[0] = (2 x m), m is # of edges
         start_idx = 0
         for i in range(num_graphs):
             num_nodes = z_list[i].size(0)
@@ -511,7 +617,7 @@ class GRAPH_AUTOENCODER(nn.Module):
 
         z_with_cls_list = []
         mask_list = []
-        max_nodes_in_batch = max(z_graph.size(0) for z_graph in z_list)
+        max_nodes_in_batch = max(z_graph.size(0) for z_graph in z_list) # 배치 내 최대 노드 수
         
         for i in range(num_graphs):
             num_nodes = z_list[i].size(0)
@@ -520,15 +626,15 @@ class GRAPH_AUTOENCODER(nn.Module):
             z_graph = z_list[i].unsqueeze(1)  # [num_nodes, 1, hidden_dim]
             
             pad_size = max_nodes_in_batch - num_nodes
-            z_graph_padded = F.pad(z_graph, (0, 0, 0, 0, 0, pad_size), 'constant', 0)  # [max_nodes, 1, hidden_dim]
+            z_graph_padded = F.pad(z_graph, (0, 0, 0, 0, 0, pad_size), 'constant', 0)  # [max_nodes, 1, hidden_dim] -> 나머지는 패딩
             
-            z_with_cls = torch.cat([cls_token, z_graph_padded.transpose(0, 1)], dim=1)  # [1, max_nodes+1, hidden_dim]
+            z_with_cls = torch.cat([cls_token, z_graph_padded.transpose(0, 1)], dim=1)  # [1, max_nodes+1, hidden_dim] -> CLS 추가
             z_with_cls_list.append(z_with_cls)
 
             graph_mask = torch.cat([torch.tensor([False]), torch.tensor([False]*num_nodes + [True]*pad_size)])
             mask_list.append(graph_mask)
 
-        z_with_cls_batch = torch.cat(z_with_cls_list, dim=0)  # [batch_size, max_nodes+1, hidden_dim]
+        z_with_cls_batch = torch.cat(z_with_cls_list, dim=0)  # [batch_size, max_nodes+1, hidden_dim] -> 모든 그래프에 대한 CLS 추가
         mask = torch.stack(mask_list).to(z.device)  # [batch_size, max_nodes+1]
 
         encoded = self.transformer_encoder(z_with_cls_batch, edge_index_list, mask)
