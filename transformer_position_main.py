@@ -13,6 +13,7 @@ import torch.nn as nn
 import torch.optim as optim
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
+import torch_geometric.utils as utils
 
 from torch.nn import init
 from torch.optim.lr_scheduler import ReduceLROnPlateau
@@ -51,9 +52,9 @@ def train(model, train_loader, optimizer, max_nodes, device):
         x, edge_index, batch, num_graphs = data.x, data.edge_index, data.batch, data.num_graphs
 
         adj = adj_original(edge_index, batch, max_nodes)
-        print(f'adj: {adj[0][:7,:7]}')
+        # print(f'adj: {adj[0][:7,:7]}')
         x_recon, adj_recon_list, train_cls_outputs, z_, z_tilde = model(x, edge_index, batch, num_graphs)
-        print(f'adj_recon: {adj_recon_list[0][:7,:7]}')
+        # print(f'adj_recon: {adj_recon_list[0][:7,:7]}')
         
         loss = 0
         start_node = 0
@@ -62,12 +63,12 @@ def train(model, train_loader, optimizer, max_nodes, device):
             end_node = start_node + num_nodes
 
             node_loss = torch.norm(x_recon[start_node:end_node] - x[start_node:end_node], p='fro')**2 / num_nodes
-            node_loss = node_loss * 0.3
+            node_loss = node_loss * node_theta
             print(f'train_node loss: {node_loss}')
             
             # Adjacency reconstruction loss
             adj_loss = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2 / num_nodes
-            adj_loss = adj_loss / 20
+            adj_loss = adj_loss * adj_theta
             print(f'train_adj_loss: {adj_loss}')
             
             # z_node_loss = torch.norm(z_tilde[start_node:end_node] - z_[start_node:end_node], p='fro')**2 / num_nodes
@@ -113,10 +114,8 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
                 num_nodes = (batch == i).sum().item()
                 end_node = start_node + num_nodes
 
-                # Node reconstruction error
                 node_loss = (torch.norm(x_recon[start_node:end_node] - x[start_node:end_node], p='fro')**2) / num_nodes
                 
-                # Adjacency reconstruction error
                 adj_loss = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2 / num_nodes
                 
                 # cls_vec = e_cls_output[i].cpu().numpy()  # [hidden_dim]
@@ -125,12 +124,12 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
                 min_distance = distances.min() 
 
                 # recon_error = node_loss.item() * 0.1 + adj_loss.item() * 1 + min_distance * 0.5
-                recon_error = node_loss.item() * 0.3 + adj_loss.item() * 0.025 + min_distance * 0.5
+                recon_error = node_loss.item() * alpha + adj_loss.item() * beta + min_distance * gamma
                 recon_errors.append(recon_error.item())
                 
-                print(f'test_node_loss: {node_loss.item() * 0.3 }')
-                print(f'test_adj_loss: {adj_loss.item() * 0.025}')
-                print(f'test_min_distance: {min_distance * 0.5 }')
+                print(f'test_node_loss: {node_loss.item() * alpha }')
+                print(f'test_adj_loss: {adj_loss.item() * beta }')
+                print(f'test_min_distance: {min_distance * gamma }')
 
                 if data.y[i].item() == 0:
                     total_loss_ += recon_error
@@ -176,9 +175,9 @@ parser.add_argument("--dataset-name", type=str, default='COX2')
 parser.add_argument("--data-root", type=str, default='./dataset')
 parser.add_argument("--assets-root", type=str, default="./assets")
 
-parser.add_argument("--epochs", type=int, default=300)
+parser.add_argument("--epochs", type=int, default=100)
 parser.add_argument("--patience", type=int, default=5)
-parser.add_argument("--n-cluster", type=int, default=5)
+parser.add_argument("--n-cluster", type=int, default=3)
 parser.add_argument("--n-cross-val", type=int, default=5)
 parser.add_argument("--random-seed", type=int, default=0)
 parser.add_argument("--batch-size", type=int, default=300)
@@ -191,8 +190,8 @@ parser.add_argument("--factor", type=float, default=0.5)
 parser.add_argument("--step-size", type=int, default=20)
 parser.add_argument("--test-size", type=float, default=0.25)
 parser.add_argument("--dropout-rate", type=float, default=0.1)
-parser.add_argument("--weight-decay", type=float, default=0.001)
-parser.add_argument("--learning-rate", type=float, default=0.0001)
+parser.add_argument("--weight-decay", type=float, default=0.0001)
+parser.add_argument("--learning-rate", type=float, default=0.001)
 
 parser.add_argument("--alpha", type=float, default=0.3)
 parser.add_argument("--beta", type=float, default=0.025)
