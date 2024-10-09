@@ -510,6 +510,7 @@ def run(loaders, meta, random_seed, device=device):
     set_seed(random_seed)
     
     num_features = meta['num_feat']
+    num_features_ = meta['num_feat_']
     n_train = meta['num_train']
     max_nodes = meta['max_nodes']
     
