@@ -532,7 +532,7 @@ def get_ad_dataset_Tox21(dataset_name, batch_size, test_batch_size, need_str_enc
     data_ = data_train + data_test
     max_nodes = max([data_[i].num_nodes for i in range(len(data_))])
     
-    dataloader = DataLoader(data_train, batch_size, shuffle=True)
+    dataloader = DataLoader(data_train, batch_size, shuffle=True, num_workers=4)
     dataloader_test = DataLoader(data_test, batch_size, shuffle=True)
     meta = {'num_feat':dataset_num_features, 'num_feat_':dataset_num_features_ ,'num_train':len(data_train), 'max_nodes': max_nodes}
     loader_dict = {'train': dataloader, 'test': dataloader_test}
