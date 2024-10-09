@@ -384,7 +384,7 @@ class GraphBertPositionalEncoding(nn.Module):
     
     # def get_wsp_encoding(self, edge_index, num_nodes):
     #     # Weighted Shortest Path 계산
-    #     edge_index_np = edge_index.cpu().numpy() # 인풋: 각 그래프에 대한 엣지 인덱스
+    #     edge_index_np = edge_index.cpu().numpy()
     #     G = nx.Graph()
     #     G.add_nodes_from(range(num_nodes))
     #     edges = list(zip(edge_index_np[0], edge_index_np[1]))
@@ -392,7 +392,8 @@ class GraphBertPositionalEncoding(nn.Module):
         
     #     spl_matrix = torch.full((num_nodes, self.max_nodes), self.max_nodes)
         
-    #     lengths = dict(nx.all_pairs_shortest_path_length(G))        # 모든 쌍의 최단 경로를 한 번에 계산
+    #     # 모든 쌍의 최단 경로를 한 번에 계산
+    #     lengths = dict(nx.all_pairs_shortest_path_length(G))
         
     #     for i in lengths:
     #         for j, length in lengths[i].items():
@@ -404,14 +405,17 @@ class GraphBertPositionalEncoding(nn.Module):
     #     return wsp_matrix
     
     def get_laplacian_encoding(self, edge_index, num_nodes):
+        # Laplacian Eigenvector 계산
         edge_index, edge_weight = get_laplacian(edge_index, normalization='sym', 
                                             num_nodes=num_nodes)
         L = torch.sparse_coo_tensor(edge_index, edge_weight, 
                                 (num_nodes, num_nodes)).to_dense()
         
+        # CUDA 텐서를 CPU로 이동 후 NumPy로 변환
         L_np = L.cpu().numpy()
         eigenvals, eigenvecs = eigh(L_np)
         
+        # 결과를 다시 텐서로 변환하고 원래 디바이스로 이동
         le_matrix = torch.from_numpy(eigenvecs).float().to(edge_index.device)
         
         padded_le = torch.zeros((num_nodes, self.max_nodes), device=edge_index.device)
@@ -420,12 +424,15 @@ class GraphBertPositionalEncoding(nn.Module):
         return padded_le
     
     def forward(self, edge_index, num_nodes):
+        # WSP 인코딩
         wsp_matrix = self.get_wsp_encoding(edge_index, num_nodes)
         wsp_encoding = self.wsp_encoder(wsp_matrix)
         
+        # LE 인코딩
         le_matrix = self.get_laplacian_encoding(edge_index, num_nodes)
         le_encoding = self.le_encoder(le_matrix)
         
+        # WSP와 LE 결합
         pos_encoding = torch.cat([wsp_encoding, le_encoding], dim=-1)
         
         return pos_encoding
@@ -441,20 +448,26 @@ class TransformerEncoder(nn.Module):
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers)
         self.d_model = d_model
 
+
     def forward(self, src, edge_index_list, src_key_padding_mask):
         batch_size = src.size(0)
-        max_seq_len = src.size(1) # 배치 내 최대 노드 수 일 것임
+        max_seq_len = src.size(1)
         
+        # 각 그래프에 대해 포지셔널 인코딩 계산
         pos_encodings = []
-        for i in range(batch_size): # d_model = 128(hidden_dims[-1])
+        for i in range(batch_size):
+            # CLS 토큰을 위한 더미 인코딩
             cls_pos_encoding = torch.zeros(1, self.d_model).to(src.device)
             
+            # 실제 노드들의 포지셔널 인코딩
             num_nodes = (~src_key_padding_mask[i][1:]).sum().item()
             
+            # 문제 발생 위치
             if num_nodes > 0:
                 graph_pos_encoding = self.positional_encoding( 
                     edge_index_list[i], num_nodes
                 )
+                # 패딩
                 padded_pos_encoding = F.pad(
                     graph_pos_encoding, 
                     (0, 0, 0, max_seq_len - num_nodes - 1), 
@@ -463,98 +476,24 @@ class TransformerEncoder(nn.Module):
             else:
                 padded_pos_encoding = torch.zeros(max_seq_len - 1, self.d_model).to(src.device)
             
+            # CLS 토큰 인코딩과 노드 인코딩 결합
             full_pos_encoding = torch.cat([cls_pos_encoding, padded_pos_encoding], dim=0)
             pos_encodings.append(full_pos_encoding)
         
+        # 모든 배치의 포지셔널 인코딩 결합
         pos_encoding_batch = torch.stack(pos_encodings)
         
+        # 포지셔널 인코딩 추가
         src_ = src + pos_encoding_batch
         
+        # 트랜스포머 인코딩
         src_ = src_.transpose(0, 1)  # [seq_len, batch_size, hidden_dim]
         src_key_padding_mask_ = src_key_padding_mask.transpose(0, 1)
         output = self.transformer_encoder(src_, src_key_padding_mask=src_key_padding_mask_)
         output = output.transpose(0, 1)  # [batch_size, seq_len, hidden_dim]
         
         return output
-    
-    
-class ImprovedTransformerEncoder(nn.Module):
-    def __init__(self, d_model, nhead, num_layers, dim_feedforward, max_nodes, dropout=0.1):
-        super(ImprovedTransformerEncoder, self).__init__()
-        self.positional_encoding = GraphBertPositionalEncoding(d_model, max_nodes)
-        
-        self.layers = nn.ModuleList([
-            ImprovedTransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout)
-            for _ in range(num_layers)
-        ])
-        
-        self.norm = nn.LayerNorm(d_model)
-        self.d_model = d_model
 
-    def forward(self, src, edge_index_list, src_key_padding_mask):
-        batch_size = src.size(0)
-        max_seq_len = src.size(1)
-        
-        # Calculate positional encodings (same as before)
-        pos_encodings = []
-        for i in range(batch_size):
-            cls_pos_encoding = torch.zeros(1, self.d_model).to(src.device)
-            num_nodes = (~src_key_padding_mask[i][1:]).sum().item()
-            
-            if num_nodes > 0:
-                graph_pos_encoding = self.positional_encoding(edge_index_list[i], num_nodes)
-                padded_pos_encoding = F.pad(
-                    graph_pos_encoding, 
-                    (0, 0, 0, max_seq_len - num_nodes - 1), 
-                    'constant', 0
-                )
-            else:
-                padded_pos_encoding = torch.zeros(max_seq_len - 1, self.d_model).to(src.device)
-            
-            full_pos_encoding = torch.cat([cls_pos_encoding, padded_pos_encoding], dim=0)
-            pos_encodings.append(full_pos_encoding)
-        
-        pos_encoding_batch = torch.stack(pos_encodings)
-        
-        # Add positional encoding
-        src = src + pos_encoding_batch
-        
-        # Apply transformer layers
-        for layer in self.layers:
-            src = layer(src, src_key_padding_mask)
-        
-        # Apply final layer normalization
-        output = self.norm(src)
-        
-        return output
-
-
-class ImprovedTransformerEncoderLayer(nn.Module):
-    def __init__(self, d_model, nhead, dim_feedforward, dropout=0.1):
-        super(ImprovedTransformerEncoderLayer, self).__init__()
-        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
-        
-        # Two-layer feed-forward network
-        self.linear1 = nn.Linear(d_model, dim_feedforward)
-        self.linear2 = nn.Linear(dim_feedforward, d_model)
-        
-        self.norm1 = nn.LayerNorm(d_model)
-        self.norm2 = nn.LayerNorm(d_model)
-        self.dropout = nn.Dropout(dropout)
-        self.activation = nn.GELU()  # Using GELU instead of ReLU
-
-    def forward(self, src, src_key_padding_mask):
-        # Multi-head self-attention
-        src2 = self.self_attn(src, src, src, key_padding_mask=src_key_padding_mask)[0]
-        src = src + self.dropout(src2)
-        src = self.norm1(src)
-        
-        # Feed-forward network
-        src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
-        src = src + self.dropout(src2)
-        src = self.norm2(src)
-        
-        return src
     
 def perform_clustering(train_cls_outputs, random_seed, n_clusters):
     # train_cls_outputs가 이미 텐서이므로, 그대로 사용
@@ -562,7 +501,7 @@ def perform_clustering(train_cls_outputs, random_seed, n_clusters):
     cls_outputs_np = cls_outputs_tensor.detach().cpu().numpy()
 
     # K-Means 클러스터링 수행
-    kmeans = KMeans(n_clusters=n_clusters, random_state=random_seed, n_init="auto").fit(cls_outputs_np)
+    kmeans = KMeans(n_clusters=n_clusters, random_state=random_seed, n_init=10).fit(cls_outputs_np)
 
     # 클러스터 중심 저장
     cluster_centers = kmeans.cluster_centers_
@@ -576,11 +515,11 @@ class GRAPH_AUTOENCODER(nn.Module):
     def __init__(self, num_features, hidden_dims, max_nodes, dropout_rate=0.1):
         super(GRAPH_AUTOENCODER, self).__init__()
         self.encoder= Encoder(num_features, hidden_dims, dropout_rate)
-        self.transformer_encoder = ImprovedTransformerEncoder(
+        self.transformer_encoder = TransformerEncoder(
             d_model=hidden_dims[-1],
-            nhead=16,  # Increased from 8 to 16
-            num_layers=6,  # Increased from 4 to 6
-            dim_feedforward=hidden_dims[-1] * 8,  # Increased from 4 to 8
+            nhead=8,
+            num_layers=4,
+            dim_feedforward=hidden_dims[-1] * 4,
             max_nodes=max_nodes,
             dropout=dropout_rate
         )
