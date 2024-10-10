@@ -492,7 +492,7 @@ class TransformerEncoder(nn.Module):
         # 트랜스포머 인코딩
         # src_ = src_.transpose(0, 1)  # [seq_len, batch_size, hidden_dim]
         # src_key_padding_mask_ = src_key_padding_mask.transpose(0, 1)
-        output = self.transformer_encoder(src_, src_key_padding_mask=src_key_padding_mask_)
+        output = self.transformer_encoder(src_, src_key_padding_mask=src_key_padding_mask)
         # output = output.transpose(0, 1)  # [batch_size, seq_len, hidden_dim]
         
         return output
@@ -685,7 +685,7 @@ class GRAPH_AUTOENCODER(nn.Module):
 
         u = torch.cat(node_output_list, dim=0)  # [total_num_nodes, hidden_dim]
         # node_output_concat = torch.cat(node_output_list, dim=0)
-
+s
         u_prime = self.u_mlp(u)
         
         x_recon = self.feature_decoder(u_prime)
