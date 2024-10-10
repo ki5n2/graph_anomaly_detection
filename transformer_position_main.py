@@ -4,6 +4,7 @@ import os
 import re
 import sys
 import math
+import time
 import wandb
 import torch
 import random
@@ -124,11 +125,11 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
                 # cls_vec = e_cls_output[i].cpu().numpy()  # [hidden_dim]
                 cls_vec = e_cls_output[i].detach().cpu().numpy()  # [hidden_dim]
                 distances = cdist([cls_vec], cluster_centers, metric='euclidean')  # [1, n_clusters]
-                min_distance = distances.min() 
+                min_distance = distances.min()
 
                 # recon_error = node_loss.item() * 0.1 + adj_loss.item() * 1 + min_distance * 0.5
-                recon_error = node_loss.item() * alpha + adj_loss.item() * beta + min_distance * gamma
-                recon_errors.append(recon_error.item())
+                recon_error = node_loss.item() * alpha + adj_loss.item() * beta + min_distance.item() * gamma
+                recon_errors.append(recon_error)
                 
                 print(f'test_node_loss: {node_loss.item() * alpha }')
                 print(f'test_adj_loss: {adj_loss.item() * beta }')
@@ -355,7 +356,6 @@ class BilinearEdgeDecoder(nn.Module):
         
 
 #%%
-
 class GraphBertPositionalEncoding(nn.Module):
     def __init__(self, d_model, max_nodes):
         super().__init__()
@@ -386,7 +386,7 @@ class GraphBertPositionalEncoding(nn.Module):
 
         return spl_matrix.to(edge_index.device)
     
-    # def get_wsp_encoding(self, edge_index, num_nodes):
+    # def get_wsp_encoding_(self, edge_index, num_nodes):
     #     # Weighted Shortest Path 계산
     #     edge_index_np = edge_index.cpu().numpy()
     #     G = nx.Graph()
@@ -452,7 +452,6 @@ class TransformerEncoder(nn.Module):
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers)
         self.d_model = d_model
 
-
     def forward(self, src, edge_index_list, src_key_padding_mask):
         batch_size = src.size(0)
         max_seq_len = src.size(1)
@@ -478,7 +477,7 @@ class TransformerEncoder(nn.Module):
                     'constant', 0
                 )
             else:
-                padded_pos_encoding = torch.zeros(max_seq_len - 1, self.d_model).to(src.device)
+                padded_pos_encoding = torch.zeros(max_seq_len - 1, d_model).to(src.device)
             
             # CLS 토큰 인코딩과 노드 인코딩 결합
             full_pos_encoding = torch.cat([cls_pos_encoding, padded_pos_encoding], dim=0)
@@ -499,121 +498,122 @@ class TransformerEncoder(nn.Module):
         return output
 
     
-# def perform_clustering(train_cls_outputs, random_seed, n_clusters):
-#     # train_cls_outputs가 이미 텐서이므로, 그대로 사용
-#     cls_outputs_tensor = train_cls_outputs  # [total_num_graphs, hidden_dim]
-#     cls_outputs_np = cls_outputs_tensor.detach().cpu().numpy()
-
-#     # K-Means 클러스터링 수행
-#     kmeans = KMeans(n_clusters=n_clusters, random_state=random_seed, n_init="auto").fit(cls_outputs_np)
-
-#     # 클러스터 중심 저장
-#     cluster_centers = kmeans.cluster_centers_
-
-#     return kmeans, cluster_centers
-
-
 def perform_clustering(train_cls_outputs, random_seed, n_clusters):
-    # train_cls_outputs가 이미 텐서이므로, NumPy 배열로 변환
-    cls_outputs_np = train_cls_outputs.detach().cpu().numpy()
+    # train_cls_outputs가 이미 텐서이므로, 그대로 사용
+    cls_outputs_tensor = train_cls_outputs  # [total_num_graphs, hidden_dim]
+    cls_outputs_np = cls_outputs_tensor.detach().cpu().numpy()
+    
+    # K-Means 클러스터링 수행
+    kmeans = KMeans(n_clusters=n_clusters, random_state=random_seed, n_init="auto").fit(cls_outputs_np)
 
-    # 계층적 클러스터링 수행
-    linkage_matrix = linkage(cls_outputs_np, method='ward')
+    # 클러스터 중심 저장
+    cluster_centers = kmeans.cluster_centers_
 
-    # 클러스터 할당
-    cluster_assignments = fcluster(linkage_matrix, n_clusters, criterion='maxclust')
-
-    # 클러스터 중심 계산
-    cluster_centers = np.array([
-        cls_outputs_np[cluster_assignments == i].mean(axis=0)
-        for i in range(1, n_clusters + 1)
-    ])
-
-    return cluster_assignments, cluster_centers, linkage_matrix
+    return kmeans, cluster_centers
 
 
-def analyze_clusters(train_cls_outputs, n_clusters):
-    cluster_assignments, cluster_centers, linkage_matrix = perform_clustering(train_cls_outputs, random_seed=42, n_clusters=n_clusters)
+# def perform_clustering(train_cls_outputs, random_seed, n_clusters):
+#     # train_cls_outputs가 이미 텐서이므로, NumPy 배열로 변환
+#     cls_outputs_np = train_cls_outputs.detach().cpu().numpy()
+
+#     # 계층적 클러스터링 수행
+#     linkage_matrix = linkage(cls_outputs_np, method='ward')
+
+#     # 클러스터 할당
+#     cluster_assignments = fcluster(linkage_matrix, n_clusters, criterion='maxclust')
+
+#     # 클러스터 중심 계산
+#     cluster_centers = np.array([
+#         cls_outputs_np[cluster_assignments == i].mean(axis=0)
+#         for i in range(1, n_clusters + 1)
+#     ])
+
+#     return cluster_assignments, cluster_centers, linkage_matrix
+
+
+# def analyze_clusters(train_cls_outputs, n_clusters):
+#     cluster_assignments, cluster_centers, linkage_matrix = perform_clustering(train_cls_outputs, random_seed=42, n_clusters=n_clusters)
         
-    # 클러스터링 결과 분석 (예: 각 클러스터의 크기)
-    cluster_sizes = [np.sum(cluster_assignments == i) for i in range(1, n_clusters + 1)]
+#     # 클러스터링 결과 분석 (예: 각 클러스터의 크기)
+#     cluster_sizes = [np.sum(cluster_assignments == i) for i in range(1, n_clusters + 1)]
         
-    # 덴드로그램 생성 (선택사항)
-    # plt.figure(figsize=(10, 7))
-    # dendrogram(linkage_matrix)
-    # plt.title('Hierarchical Clustering Dendrogram')
-    # plt.xlabel('Sample Index')
-    # plt.ylabel('Distance')
-    # plt.show()
+#     # 덴드로그램 생성 (선택사항)
+#     # plt.figure(figsize=(10, 7))
+#     # dendrogram(linkage_matrix)
+#     # plt.title('Hierarchical Clustering Dendrogram')
+#     # plt.xlabel('Sample Index')
+#     # plt.ylabel('Distance')
+#     # plt.show()
         
-    return cluster_assignments, cluster_centers, cluster_sizes
+#     return cluster_assignments, cluster_centers, cluster_sizes
     
 
-def perform_clustering(train_cls_outputs, method='ward', max_clusters=20):
-    # train_cls_outputs가 이미 텐서이므로, NumPy 배열로 변환
-    cls_outputs_np = train_cls_outputs.detach().cpu().numpy()
+# def perform_clustering(train_cls_outputs, method='ward', max_clusters=20):
+#     # train_cls_outputs가 이미 텐서이므로, NumPy 배열로 변환
+#     cls_outputs_np = train_cls_outputs.detach().cpu().numpy()
 
-    # 계층적 클러스터링 수행
-    linkage_matrix = linkage(cls_outputs_np, method=method)
+#     # 계층적 클러스터링 수행
+#     linkage_matrix = linkage(cls_outputs_np, method=method)
 
-    # 덴드로그램 생성
-    plt.figure(figsize=(10, 7))
-    dendrogram(linkage_matrix)
-    plt.title('Hierarchical Clustering Dendrogram')
-    plt.xlabel('Sample Index')
-    plt.ylabel('Distance')
-    plt.show()
+#     # 덴드로그램 생성
+#     plt.figure(figsize=(10, 7))
+#     dendrogram(linkage_matrix)
+#     plt.title('Hierarchical Clustering Dendrogram')
+#     plt.xlabel('Sample Index')
+#     plt.ylabel('Distance')
+#     plt.show()
 
-    # 실루엣 점수를 사용하여 최적의 클러스터 수 결정
-    silhouette_scores = []
-    for n_clusters in range(2, max_clusters + 1):
-        cluster_assignments = fcluster(linkage_matrix, n_clusters, criterion='maxclust')
-        score = silhouette_score(cls_outputs_np, cluster_assignments)
-        silhouette_scores.append(score)
+#     # 실루엣 점수를 사용하여 최적의 클러스터 수 결정
+#     silhouette_scores = []
+#     for n_clusters in range(2, max_clusters + 1):
+#         cluster_assignments = fcluster(linkage_matrix, n_clusters, criterion='maxclust')
+#         score = silhouette_score(cls_outputs_np, cluster_assignments)
+#         silhouette_scores.append(score)
 
-    # 실루엣 점수 그래프 그리기
-    plt.figure(figsize=(10, 5))
-    plt.plot(range(2, max_clusters + 1), silhouette_scores, marker='o')
-    plt.title('Silhouette Score vs Number of Clusters')
-    plt.xlabel('Number of Clusters')
-    plt.ylabel('Silhouette Score')
-    plt.show()
+#     # 실루엣 점수 그래프 그리기
+#     plt.figure(figsize=(10, 5))
+#     plt.plot(range(2, max_clusters + 1), silhouette_scores, marker='o')
+#     plt.title('Silhouette Score vs Number of Clusters')
+#     plt.xlabel('Number of Clusters')
+#     plt.ylabel('Silhouette Score')
+#     plt.show()
 
-    # 최적의 클러스터 수 선택
-    optimal_n_clusters = silhouette_scores.index(max(silhouette_scores)) + 2
+#     # 최적의 클러스터 수 선택
+#     optimal_n_clusters = silhouette_scores.index(max(silhouette_scores)) + 2
 
-    # 최종 클러스터 할당
-    cluster_assignments = fcluster(linkage_matrix, optimal_n_clusters, criterion='maxclust')
+#     # 최종 클러스터 할당
+#     cluster_assignments = fcluster(linkage_matrix, optimal_n_clusters, criterion='maxclust')
 
-    # 클러스터 중심 계산
-    cluster_centers = np.array([
-        cls_outputs_np[cluster_assignments == i].mean(axis=0)
-        for i in range(1, optimal_n_clusters + 1)
-    ])
+#     # 클러스터 중심 계산
+#     cluster_centers = np.array([
+#         cls_outputs_np[cluster_assignments == i].mean(axis=0)
+#         for i in range(1, optimal_n_clusters + 1)
+#     ])
 
-    return cluster_assignments, cluster_centers, linkage_matrix, optimal_n_clusters
+#     return cluster_assignments, cluster_centers, linkage_matrix, optimal_n_clusters
 
-# GRAPH_AUTOENCODER 클래스 내부에서 클러스터링 결과를 사용하는 메서드 (예시)
-def analyze_clusters(train_cls_outputs, method='ward', max_clusters=20):
-    cluster_assignments, cluster_centers, linkage_matrix, n_clusters = perform_clustering(
-        train_cls_outputs, method=method, max_clusters=max_clusters
-    )
+# # GRAPH_AUTOENCODER 클래스 내부에서 클러스터링 결과를 사용하는 메서드 (예시)
+# def analyze_clusters(train_cls_outputs, method='ward', max_clusters=20):
+#     cluster_assignments, cluster_centers, linkage_matrix, n_clusters = perform_clustering(
+#         train_cls_outputs, method=method, max_clusters=max_clusters
+#     )
     
-    # 클러스터링 결과 분석 (예: 각 클러스터의 크기)
-    cluster_sizes = [np.sum(cluster_assignments == i) for i in range(1, n_clusters + 1)]
+#     # 클러스터링 결과 분석 (예: 각 클러스터의 크기)
+#     cluster_sizes = [np.sum(cluster_assignments == i) for i in range(1, n_clusters + 1)]
     
-    print(f"Optimal number of clusters: {n_clusters}")
-    print("Cluster sizes:", cluster_sizes)
+#     print(f"Optimal number of clusters: {n_clusters}")
+#     print("Cluster sizes:", cluster_sizes)
     
-    return cluster_assignments, cluster_centers, cluster_sizes, n_clusters
+#     return cluster_assignments, cluster_centers, cluster_sizes, n_clusters
+
 
 #%%
 # GRAPH_AUTOENCODER 클래스 수정
 class GRAPH_AUTOENCODER(nn.Module):
     def __init__(self, num_features, hidden_dims, max_nodes, dropout_rate=0.1):
         super(GRAPH_AUTOENCODER, self).__init__()
-        self.encoder= Encoder(num_features, hidden_dims, dropout_rate)
-        self.transformer_encoder = TransformerEncoder(
+        self.encoder = Encoder(num_features, hidden_dims, dropout_rate)
+        self.transformer = TransformerEncoder(
             d_model=hidden_dims[-1],
             nhead=8,
             num_layers=4,
@@ -673,7 +673,7 @@ class GRAPH_AUTOENCODER(nn.Module):
         z_with_cls_batch = torch.cat(z_with_cls_list, dim=0)  # [batch_size, max_nodes+1, hidden_dim] -> 모든 그래프에 대한 CLS 추가
         mask = torch.stack(mask_list).to(z.device)  # [batch_size, max_nodes+1]
 
-        encoded = self.transformer_encoder(z_with_cls_batch, edge_index_list, mask)
+        encoded = self.transformer(z_with_cls_batch, edge_index_list, mask)
 
         cls_output = encoded[:, 0, :]       # [batch_size, hidden_dim]
         node_output = encoded[:, 1:, :]     # [batch_size, max_nodes, hidden_dim]
@@ -777,16 +777,24 @@ def run(dataset_name, random_seed, dataset_AN, split=None, device=device):
     train_cls_outputs = []
 
     for epoch in range(1, epochs+1):
+        fold_start = time.time()  # 현재 폴드 시작 시간
         train_loss, num_sample, train_cls_outputs = train(model, train_loader, optimizer, max_nodes, device)
         
         info_train = 'Epoch {:3d}, Loss {:.4f}'.format(epoch, train_loss)
 
         if epoch % log_interval == 0:
-            # kmeans, cluster_centers = perform_clustering(train_cls_outputs, random_seed, n_clusters=n_cluster)
-            cluster_assignments, cluster_centers, cluster_sizes, n_clusters = analyze_clusters(train_cls_outputs)
             
+            kmeans, cluster_centers = perform_clustering(train_cls_outputs, random_seed, n_clusters=n_cluster)
+            # cluster_assignments, cluster_centers, cluster_sizes, n_clusters = analyze_clusters(train_cls_outputs)
+            
+            # cluster_centers = train_cls_outputs.mean(dim=0)
+            # cluster_centers = cluster_centers.detach().cpu().numpy()
+            # cluster_centers = cluster_centers.reshape(-1, hidden_dims[-1])
+
             auroc, auprc, precision, recall, f1, test_loss, test_loss_anomaly = evaluate_model(model, test_loader, max_nodes, cluster_centers, device)
-            
+            fold_end = time.time()  # 현재 폴드 종료 시간
+            fold_duration = fold_end - fold_start  # 현재 폴드 실행 시간
+            print(fold_duration)
             scheduler.step(auroc)
             
             all_results.append((auroc, auprc, precision, recall, f1, test_loss, test_loss_anomaly))
@@ -805,15 +813,26 @@ if __name__ == '__main__':
     ad_aucs = []
     splits = get_ad_split_TU(dataset_name, n_cross_val)    
 
+    start_time = time.time()  # 전체 실행 시작 시간
+
     for trial in range(n_cross_val):
+        fold_start = time.time()  # 현재 폴드 시작 시간
+
         print(f"Starting fold {trial + 1}/{n_cross_val}")
         ad_auc = run(dataset_name, random_seed, dataset_AN, split=splits[trial])
         ad_aucs.append(ad_auc)
-
+        
+        fold_end = time.time()  # 현재 폴드 종료 시간
+        fold_duration = fold_end - fold_start  # 현재 폴드 실행 시간
+        fold_times.append(fold_duration)
+        
+        print(f"Fold {trial + 1} finished in {fold_duration:.2f} seconds.")
+        
+    total_time = time.time() - start_time  # 전체 실행 시간
     results = 'AUC: {:.2f}+-{:.2f}'.format(np.mean(ad_aucs) * 100, np.std(ad_aucs) * 100)
     print(len(ad_aucs))
-
     print('[FINAL RESULTS] ' + results)
-    
+    print(f"Total execution time: {total_time:.2f} seconds")
+
     
 # %%
