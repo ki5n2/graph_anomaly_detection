@@ -4,7 +4,6 @@ import os
 import re
 import sys
 import math
-import time
 import wandb
 import torch
 import random
@@ -22,27 +21,24 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch_geometric.data import Data, Batch
 from torch_geometric.loader import DataLoader
 from torch_geometric.datasets import TUDataset
-from torch_geometric.utils import to_dense_adj, to_dense_batch
+from torch.optim.lr_scheduler import CosineAnnealingLR, ExponentialLR, OneCycleLR
+from torch_geometric.utils import to_networkx, get_laplacian, to_dense_adj, to_dense_batch
 from torch_geometric.nn import GCNConv, global_mean_pool, global_max_pool, global_add_pool
 
 from sklearn.cluster import KMeans
 from scipy.spatial.distance import cdist
-from sklearn.metrics import auc, roc_curve, precision_score, recall_score, f1_score, precision_recall_curve
+from scipy.stats import wasserstein_distance
+from sklearn.metrics import auc, roc_curve, precision_score, recall_score, f1_score, precision_recall_curve, roc_auc_score
 from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
 
 from functools import partial
+from scipy.linalg import eigh
 from multiprocessing import Pool
 
-from module.loss import loss_cal
-from util import set_seed, set_device, EarlyStopping, get_ad_split_TU, get_data_loaders_TU, adj_original, batch_nodes_subgraphs
+from modules.loss import loss_cal
+from modules.utils import set_seed, set_device, EarlyStopping, get_ad_split_TU, get_data_loaders_TU, adj_original
 
-from torch_geometric.utils import to_networkx, get_laplacian
-from scipy.linalg import eigh
 import networkx as nx
-
-from scipy.cluster.hierarchy import dendrogram, linkage, fcluster
-from sklearn.metrics import silhouette_score
-
 
 #%%
 '''TRAIN'''
@@ -56,9 +52,7 @@ def train(model, train_loader, optimizer, max_nodes, device):
         x, edge_index, batch, num_graphs = data.x, data.edge_index, data.batch, data.num_graphs
 
         adj = adj_original(edge_index, batch, max_nodes)
-        # print(f'adj: {adj[0][:7,:7]}')
         x_recon, adj_recon_list, train_cls_outputs, z_ = model(x, edge_index, batch, num_graphs)
-        # print(f'adj_recon: {adj_recon_list[0][:7,:7]}')
         
         loss = 0
         start_node = 0
@@ -70,7 +64,6 @@ def train(model, train_loader, optimizer, max_nodes, device):
             node_loss = node_loss * node_theta
             print(f'train_node loss: {node_loss}')
             
-            # Adjacency reconstruction loss
             adj_loss = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2 / num_nodes
             adj_loss = adj_loss * adj_theta
             print(f'train_adj_loss: {adj_loss}')
@@ -80,7 +73,7 @@ def train(model, train_loader, optimizer, max_nodes, device):
             # print(f'train_z_node loss: {z_node_loss}')
             
             loss += node_loss + adj_loss
-            
+
             start_node = end_node
 
         num_sample += num_graphs
@@ -90,6 +83,7 @@ def train(model, train_loader, optimizer, max_nodes, device):
         total_loss += loss.item()
 
     return total_loss / len(train_loader), num_sample, train_cls_outputs.detach().cpu()
+
 
 #%%
 '''EVALUATION'''
@@ -125,15 +119,15 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
                 # cls_vec = e_cls_output[i].cpu().numpy()  # [hidden_dim]
                 cls_vec = e_cls_output[i].detach().cpu().numpy()  # [hidden_dim]
                 distances = cdist([cls_vec], cluster_centers, metric='euclidean')  # [1, n_clusters]
-                min_distance = distances.min()
+                min_distance = distances.min()  # 가장 가까운 클러스터까지의 거리
 
                 # recon_error = node_loss.item() * 0.1 + adj_loss.item() * 1 + min_distance * 0.5
-                recon_error = node_loss.item() * alpha + adj_loss.item() * beta + min_distance.item() * gamma
-                recon_errors.append(recon_error)
-                
-                print(f'test_node_loss: {node_loss.item() * alpha }')
-                print(f'test_adj_loss: {adj_loss.item() * beta }')
-                print(f'test_min_distance: {min_distance * gamma }')
+                recon_error = (node_loss.item() * alpha) + (adj_loss.item() * beta) + (min_distance * gamma)
+                recon_errors.append(recon_error.item())
+        
+                print(f'test_node_loss: {node_loss.item() * alpha}')
+                print(f'test_adj_loss: {adj_loss.item() * beta}')
+                print(f'test_min_distance: {min_distance * gamma}')
 
                 if data.y[i].item() == 0:
                     total_loss_ += recon_error
@@ -141,7 +135,7 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
                     total_loss_anomaly_ += recon_error
 
                 start_node = end_node
-            
+
             total_loss = total_loss_ / sum(data.y == 0)
             total_loss_anomaly = total_loss_anomaly_ / sum(data.y == 1)
             
@@ -175,7 +169,7 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
 '''ARGPARSER'''
 parser = argparse.ArgumentParser()
 
-parser.add_argument("--dataset-name", type=str, default='COX2')
+parser.add_argument("--dataset-name", type=str, default='DHFR')
 parser.add_argument("--data-root", type=str, default='./dataset')
 parser.add_argument("--assets-root", type=str, default="./assets")
 
@@ -184,8 +178,8 @@ parser.add_argument("--patience", type=int, default=5)
 parser.add_argument("--n-cluster", type=int, default=3)
 parser.add_argument("--n-cross-val", type=int, default=5)
 parser.add_argument("--random-seed", type=int, default=0)
+parser.add_argument("--log-interval", type=int, default=5)
 parser.add_argument("--batch-size", type=int, default=300)
-parser.add_argument("--log_interval", type=int, default=5)
 parser.add_argument("--n-test-anomaly", type=int, default=400)
 parser.add_argument("--test-batch-size", type=int, default=128)
 parser.add_argument("--hidden-dims", nargs='+', type=int, default=[256, 128])
@@ -195,13 +189,13 @@ parser.add_argument("--step-size", type=int, default=20)
 parser.add_argument("--test-size", type=float, default=0.25)
 parser.add_argument("--dropout-rate", type=float, default=0.1)
 parser.add_argument("--weight-decay", type=float, default=0.0001)
-parser.add_argument("--learning-rate", type=float, default=0.0001)
+parser.add_argument("--learning-rate", type=float, default=0.001)
 
 parser.add_argument("--alpha", type=float, default=0.3)
 parser.add_argument("--beta", type=float, default=0.025)
-parser.add_argument("--gamma", type=float, default=0.25)
-parser.add_argument("--node-theta", type=float, default=0.03)
-parser.add_argument("--adj-theta", type=float, default=0.005)
+parser.add_argument("--gamma", type=float, default=0.5)
+parser.add_argument("--node-theta", type=float, default=0.3)
+parser.add_argument("--adj-theta", type=int, default=0.05)
 
 try:
     args = parser.parse_args()
@@ -251,9 +245,18 @@ torch.backends.cuda.matmul.allow_tf32 = False  # 더 정확한 연산을 위해 
 # CUDA 디버깅 활성화
 os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
+wandb.init(project="graph anomaly detection", entity="ki5n2")
+
+wandb.config.update(args)
+
+wandb.config = {
+  "random_seed": random_seed,
+  "learning_rate": learning_rate,
+  "epochs": epochs
+}
+
 
 # %%
-'''MODEL CONSTRUCTION'''
 class ResidualBlock(nn.Module):
     def __init__(self, in_channels, out_channels, dropout_rate=0.1):
         super(ResidualBlock, self).__init__()
@@ -272,7 +275,7 @@ class ResidualBlock(nn.Module):
         if isinstance(self.shortcut, nn.Linear):
             nn.init.xavier_uniform_(self.shortcut.weight, gain=1.0)
             nn.init.zeros_(self.shortcut.bias)
-    
+
     def forward(self, x, edge_index):
         residual = self.shortcut(x)
         
@@ -353,9 +356,8 @@ class BilinearEdgeDecoder(nn.Module):
         padded_adj[:actual_nodes, :actual_nodes] = adj
         
         return padded_adj
-        
 
-#%%
+
 class GraphBertPositionalEncoding(nn.Module):
     def __init__(self, d_model, max_nodes):
         super().__init__()
@@ -386,7 +388,7 @@ class GraphBertPositionalEncoding(nn.Module):
 
         return spl_matrix.to(edge_index.device)
     
-    # def get_wsp_encoding_(self, edge_index, num_nodes):
+    # def get_wsp_encoding(self, edge_index, num_nodes):
     #     # Weighted Shortest Path 계산
     #     edge_index_np = edge_index.cpu().numpy()
     #     G = nx.Graph()
@@ -440,58 +442,18 @@ class GraphBertPositionalEncoding(nn.Module):
         pos_encoding = torch.cat([wsp_encoding, le_encoding], dim=-1)
         
         return pos_encoding
-    
 
-class HybridTransformerLayer(nn.Module):
-    def __init__(self, d_model, nhead, dim_feedforward, dropout=0.1):
-        super(HybridTransformerLayer, self).__init__()
-        self.node_attn = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, batch_first=True)
-        self.graph_attn = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, batch_first=False)
-        self.norm = nn.LayerNorm(d_model)
 
-    def forward(self, src, src_key_padding_mask=None):
-        # Node attention (within graphs)
-        node_out = self.node_attn(src, src_key_padding_mask)
-        
-        # Graph attention (across graphs for each node position)
-        graph_in = src.transpose(0, 1)
-        graph_mask = src_key_padding_mask.transpose(0, 1)
-        graph_out = self.graph_attn(graph_in, graph_mask)
-        graph_out = graph_out.transpose(0, 1)
-        
-        # Combine outputs
-        combined = self.norm(node_out + graph_out)
-        return combined
-    
-    
-class HybridTransformerEncoder(nn.Module):
-    def __init__(self, d_model, nhead, num_layers, dim_feedforward, dropout=0.1):
-        super(HybridTransformerEncoder, self).__init__()
-        self.layers = nn.ModuleList([
-            HybridTransformerLayer(d_model, nhead, dim_feedforward, dropout)
-            for _ in range(num_layers)
-        ])
-
-    def forward(self, src, src_key_padding_mask=None):
-        output = src
-        for layer in self.layers:
-            output = layer(output, src_key_padding_mask)
-        return output
-    
-    
 class TransformerEncoder(nn.Module):
     def __init__(self, d_model, nhead, num_layers, dim_feedforward, max_nodes, dropout=0.1):
         super(TransformerEncoder, self).__init__()
         self.positional_encoding = GraphBertPositionalEncoding(d_model, max_nodes)
-        # encoder_layer = nn.TransformerEncoderLayer(
-        #     d_model, nhead, dim_feedforward, dropout, activation='relu', batch_first=True
-        # )
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model, nhead, dim_feedforward, dropout, activation='relu', batch_first=False
+        )
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers)
         self.d_model = d_model
-        self.transformer = HybridTransformerEncoder(d_model, nhead, num_layers, dim_feedforward, dropout)
 
-        # self.transformer_encoder1 = nn.TransformerEncoder(encoder_layer, num_layers)
-        # self.transformer_encoder2 = nn.TransformerEncoder(encoder_layer, num_layers)
-        
 
     def forward(self, src, edge_index_list, src_key_padding_mask):
         batch_size = src.size(0)
@@ -518,7 +480,7 @@ class TransformerEncoder(nn.Module):
                     'constant', 0
                 )
             else:
-                padded_pos_encoding = torch.zeros(max_seq_len - 1, d_model).to(src.device)
+                padded_pos_encoding = torch.zeros(max_seq_len - 1, self.d_model).to(src.device)
             
             # CLS 토큰 인코딩과 노드 인코딩 결합
             full_pos_encoding = torch.cat([cls_pos_encoding, padded_pos_encoding], dim=0)
@@ -530,124 +492,105 @@ class TransformerEncoder(nn.Module):
         # 포지셔널 인코딩 추가
         src_ = src + pos_encoding_batch
         
-        output = self.transformer(src_, src_key_padding_mask=mask)
-        
-        # # 트랜스포머 인코딩
-        # output = self.transformer_encoder1(src_, src_key_padding_mask=src_key_padding_mask)
-        # src_T = src_.transpose(0, 1)  # [seq_len, batch_size, hidden_dim]
-        # src_key_padding_mask_T = src_key_padding_mask.transpose(0, 1)
-        # output_T = self.transformer_encoder2(src_T, src_key_padding_mask=src_key_padding_mask_T)
-        # output_T = output_T.transpose(0, 1)  # [batch_size, seq_len, hidden_dim]
+        # 트랜스포머 인코딩
+        src_ = src_.transpose(0, 1)  # [seq_len, batch_size, hidden_dim]
+        src_key_padding_mask_ = src_key_padding_mask.transpose(0, 1)
+        output = self.transformer_encoder(src_, src_key_padding_mask=src_key_padding_mask_)
+        output = output.transpose(0, 1)  # [batch_size, seq_len, hidden_dim]
         
         return output
 
+
+class ImprovedTransformerEncoder(nn.Module):
+    def __init__(self, d_model, nhead, num_layers, dim_feedforward, max_nodes, dropout=0.1):
+        super(ImprovedTransformerEncoder, self).__init__()
+        self.positional_encoding = GraphBertPositionalEncoding(d_model, max_nodes)
+        
+        self.layers = nn.ModuleList([
+            ImprovedTransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout)
+            for _ in range(num_layers)
+        ])
+        
+        self.norm = nn.LayerNorm(d_model)
+        self.d_model = d_model
+
+    def forward(self, src, edge_index_list, src_key_padding_mask):
+        batch_size = src.size(0)
+        max_seq_len = src.size(1)
+        
+        # Calculate positional encodings (same as before)
+        pos_encodings = []
+        for i in range(batch_size):
+            cls_pos_encoding = torch.zeros(1, self.d_model).to(src.device)
+            num_nodes = (~src_key_padding_mask[i][1:]).sum().item()
+            
+            if num_nodes > 0:
+                graph_pos_encoding = self.positional_encoding(edge_index_list[i], num_nodes)
+                padded_pos_encoding = F.pad(
+                    graph_pos_encoding, 
+                    (0, 0, 0, max_seq_len - num_nodes - 1), 
+                    'constant', 0
+                )
+            else:
+                padded_pos_encoding = torch.zeros(max_seq_len - 1, self.d_model).to(src.device)
+            
+            full_pos_encoding = torch.cat([cls_pos_encoding, padded_pos_encoding], dim=0)
+            pos_encodings.append(full_pos_encoding)
+        
+        pos_encoding_batch = torch.stack(pos_encodings)
+        
+        # Add positional encoding
+        src = src + pos_encoding_batch
+        
+        # Apply transformer layers
+        for layer in self.layers:
+            src = layer(src, src_key_padding_mask)
+        
+        # Apply final layer normalization
+        output = self.norm(src)
+        
+        return output
+
+
+class ImprovedTransformerEncoderLayer(nn.Module):
+    def __init__(self, d_model, nhead, dim_feedforward, dropout=0.1):
+        super(ImprovedTransformerEncoderLayer, self).__init__()
+        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+        
+        # Two-layer feed-forward network
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+        
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+        self.activation = nn.GELU()  # Using GELU instead of ReLU
+
+    def forward(self, src, src_key_padding_mask):
+        # Multi-head self-attention
+        src2 = self.self_attn(src, src, src, key_padding_mask=src_key_padding_mask)[0]
+        src = src + self.dropout(src2)
+        src = self.norm1(src)
+        
+        # Feed-forward network
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
+        src = src + self.dropout(src2)
+        src = self.norm2(src)
+        
+        return src
+    
 def perform_clustering(train_cls_outputs, random_seed, n_clusters):
     # train_cls_outputs가 이미 텐서이므로, 그대로 사용
     cls_outputs_tensor = train_cls_outputs  # [total_num_graphs, hidden_dim]
     cls_outputs_np = cls_outputs_tensor.detach().cpu().numpy()
-    
+
     # K-Means 클러스터링 수행
     kmeans = KMeans(n_clusters=n_clusters, random_state=random_seed, n_init="auto").fit(cls_outputs_np)
 
     # 클러스터 중심 저장
     cluster_centers = kmeans.cluster_centers_
 
-    return kmeans, cluster_centersㄴ
-
-
-# def perform_clustering(train_cls_outputs, random_seed, n_clusters):
-#     # train_cls_outputs가 이미 텐서이므로, NumPy 배열로 변환
-#     cls_outputs_np = train_cls_outputs.detach().cpu().numpy()
-
-#     # 계층적 클러스터링 수행
-#     linkage_matrix = linkage(cls_outputs_np, method='ward')
-
-#     # 클러스터 할당
-#     cluster_assignments = fcluster(linkage_matrix, n_clusters, criterion='maxclust')
-
-#     # 클러스터 중심 계산
-#     cluster_centers = np.array([
-#         cls_outputs_np[cluster_assignments == i].mean(axis=0)
-#         for i in range(1, n_clusters + 1)
-#     ])
-
-#     return cluster_assignments, cluster_centers, linkage_matrix
-
-
-# def analyze_clusters(train_cls_outputs, n_clusters):
-#     cluster_assignments, cluster_centers, linkage_matrix = perform_clustering(train_cls_outputs, random_seed=42, n_clusters=n_clusters)
-        
-#     # 클러스터링 결과 분석 (예: 각 클러스터의 크기)
-#     cluster_sizes = [np.sum(cluster_assignments == i) for i in range(1, n_clusters + 1)]
-        
-#     # 덴드로그램 생성 (선택사항)
-#     # plt.figure(figsize=(10, 7))
-#     # dendrogram(linkage_matrix)
-#     # plt.title('Hierarchical Clustering Dendrogram')
-#     # plt.xlabel('Sample Index')
-#     # plt.ylabel('Distance')
-#     # plt.show()
-        
-#     return cluster_assignments, cluster_centers, cluster_sizes
-    
-
-# def perform_clustering(train_cls_outputs, method='ward', max_clusters=20):
-#     # train_cls_outputs가 이미 텐서이므로, NumPy 배열로 변환
-#     cls_outputs_np = train_cls_outputs.detach().cpu().numpy()
-
-#     # 계층적 클러스터링 수행
-#     linkage_matrix = linkage(cls_outputs_np, method=method)
-
-#     # 덴드로그램 생성
-#     plt.figure(figsize=(10, 7))
-#     dendrogram(linkage_matrix)
-#     plt.title('Hierarchical Clustering Dendrogram')
-#     plt.xlabel('Sample Index')
-#     plt.ylabel('Distance')
-#     plt.show()
-
-#     # 실루엣 점수를 사용하여 최적의 클러스터 수 결정
-#     silhouette_scores = []
-#     for n_clusters in range(2, max_clusters + 1):
-#         cluster_assignments = fcluster(linkage_matrix, n_clusters, criterion='maxclust')
-#         score = silhouette_score(cls_outputs_np, cluster_assignments)
-#         silhouette_scores.append(score)
-
-#     # 실루엣 점수 그래프 그리기
-#     plt.figure(figsize=(10, 5))
-#     plt.plot(range(2, max_clusters + 1), silhouette_scores, marker='o')
-#     plt.title('Silhouette Score vs Number of Clusters')
-#     plt.xlabel('Number of Clusters')
-#     plt.ylabel('Silhouette Score')
-#     plt.show()
-
-#     # 최적의 클러스터 수 선택
-#     optimal_n_clusters = silhouette_scores.index(max(silhouette_scores)) + 2
-
-#     # 최종 클러스터 할당
-#     cluster_assignments = fcluster(linkage_matrix, optimal_n_clusters, criterion='maxclust')
-
-#     # 클러스터 중심 계산
-#     cluster_centers = np.array([
-#         cls_outputs_np[cluster_assignments == i].mean(axis=0)
-#         for i in range(1, optimal_n_clusters + 1)
-#     ])
-
-#     return cluster_assignments, cluster_centers, linkage_matrix, optimal_n_clusters
-
-# # GRAPH_AUTOENCODER 클래스 내부에서 클러스터링 결과를 사용하는 메서드 (예시)
-# def analyze_clusters(train_cls_outputs, method='ward', max_clusters=20):
-#     cluster_assignments, cluster_centers, linkage_matrix, n_clusters = perform_clustering(
-#         train_cls_outputs, method=method, max_clusters=max_clusters
-#     )
-    
-#     # 클러스터링 결과 분석 (예: 각 클러스터의 크기)
-#     cluster_sizes = [np.sum(cluster_assignments == i) for i in range(1, n_clusters + 1)]
-    
-#     print(f"Optimal number of clusters: {n_clusters}")
-#     print("Cluster sizes:", cluster_sizes)
-    
-#     return cluster_assignments, cluster_centers, cluster_sizes, n_clusters
+    return kmeans, cluster_centers
 
 
 #%%
@@ -655,23 +598,15 @@ def perform_clustering(train_cls_outputs, random_seed, n_clusters):
 class GRAPH_AUTOENCODER(nn.Module):
     def __init__(self, num_features, hidden_dims, max_nodes, dropout_rate=0.1):
         super(GRAPH_AUTOENCODER, self).__init__()
-        self.encoder = Encoder(num_features, hidden_dims, dropout_rate)
-        self.transformer = TransformerEncoder(
+        self.encoder= Encoder(num_features, hidden_dims, dropout_rate)
+        self.transformer = ImprovedTransformerEncoder(
             d_model=hidden_dims[-1],
-            nhead=8,
-            num_layers=4,
-            dim_feedforward=hidden_dims[-1] * 4,
+            nhead=16,  # Increased from 8 to 16
+            num_layers=6,  # Increased from 4 to 6
+            dim_feedforward=hidden_dims[-1] * 8,  # Increased from 4 to 8
             max_nodes=max_nodes,
             dropout=dropout_rate
         )
-        # self.transformer = TransformerEncoder(
-        #     d_model=hidden_dims[-1],
-        #     nhead=8,
-        #     num_layers=4,
-        #     dim_feedforward=hidden_dims[-1] * 4,
-        #     max_nodes=max_nodes,
-        #     dropout=dropout_rate
-        # )
         self.u_mlp = nn.Sequential(
             nn.Linear(hidden_dims[-1], hidden_dims[-1]),
             nn.ReLU(),
@@ -691,8 +626,9 @@ class GRAPH_AUTOENCODER(nn.Module):
         z_ = self.encoder(x, edge_index)
         z = self.dropout(z_)
 
-        z_list = [z[batch == i] for i in range(num_graphs)] # 그래프 별 z 저장 (batch_size, num nodes, feature dim)
-        edge_index_list = [] # 그래프 별 엣지 인덱스 저장 (batch_size), edge_index_list[0] = (2 x m), m is # of edges
+        # 그래프별로 노드 임베딩과 엣지 인덱스를 분리
+        z_list = [z[batch == i] for i in range(num_graphs)]
+        edge_index_list = []
         start_idx = 0
         for i in range(num_graphs):
             num_nodes = z_list[i].size(0)
@@ -702,9 +638,11 @@ class GRAPH_AUTOENCODER(nn.Module):
             edge_index_list.append(graph_edges)
             start_idx += num_nodes
 
+        # 각 그래프에 대해 CLS 토큰 추가 및 패딩
         z_with_cls_list = []
         mask_list = []
-        max_nodes_in_batch = max(z_graph.size(0) for z_graph in z_list) # 배치 내 최대 노드 수
+        # 최대 노드 수 계산
+        max_nodes_in_batch = max(z_graph.size(0) for z_graph in z_list)
         
         for i in range(num_graphs):
             num_nodes = z_list[i].size(0)
@@ -712,41 +650,46 @@ class GRAPH_AUTOENCODER(nn.Module):
             cls_token = cls_token.to(device)
             z_graph = z_list[i].unsqueeze(1)  # [num_nodes, 1, hidden_dim]
             
+            # 패딩
             pad_size = max_nodes_in_batch - num_nodes
-            z_graph_padded = F.pad(z_graph, (0, 0, 0, 0, 0, pad_size), 'constant', 0)  # [max_nodes, 1, hidden_dim] -> 나머지는 패딩
+            z_graph_padded = F.pad(z_graph, (0, 0, 0, 0, 0, pad_size), 'constant', 0)  # [max_nodes, 1, hidden_dim]
             
-            z_with_cls = torch.cat([cls_token, z_graph_padded.transpose(0, 1)], dim=1)  # [1, max_nodes+1, hidden_dim] -> CLS 추가
+            # CLS 토큰 추가
+            z_with_cls = torch.cat([cls_token, z_graph_padded.transpose(0, 1)], dim=1)  # [1, max_nodes+1, hidden_dim]
             z_with_cls_list.append(z_with_cls)
 
+            # 마스크 생성 (True: 패딩된 위치, False: 유효한 위치)
             graph_mask = torch.cat([torch.tensor([False]), torch.tensor([False]*num_nodes + [True]*pad_size)])
             mask_list.append(graph_mask)
 
-        z_with_cls_batch = torch.cat(z_with_cls_list, dim=0)  # [batch_size, max_nodes+1, hidden_dim] -> 모든 그래프에 대한 CLS 추가
+        # 배치로 결합
+        z_with_cls_batch = torch.cat(z_with_cls_list, dim=0)  # [batch_size, max_nodes+1, hidden_dim]
         mask = torch.stack(mask_list).to(z.device)  # [batch_size, max_nodes+1]
 
-        encoded, encoded_T = self.transformer(z_with_cls_batch, edge_index_list, mask)
+        encoded = self.transformer(z_with_cls_batch, edge_index_list, mask)
 
+        # CLS 토큰과 노드 임베딩 분리
         cls_output = encoded[:, 0, :]       # [batch_size, hidden_dim]
-        node_output_ = encoded[:, 1:, :]     # [batch_size, max_nodes, hidden_dim]
+        node_output = encoded[:, 1:, :]     # [batch_size, max_nodes, hidden_dim]
 
-        # cls_output = encoded_T[:, 0, :]       # [batch_size, hidden_dim]
-        node_output_T = encoded_T[:, 1:, :]     # [batch_size, max_nodes, hidden_dim]
-        
-        node_output = node_output_ + node_output_T
-        
+        # 패딩된 노드 무시하고 노드 임베딩 추출
         node_output_list = []
         for i in range(num_graphs):
             num_nodes = z_list[i].size(0)
             node_output_list.append(node_output[i, :num_nodes, :])
 
+        # 노드 임베딩을 이어붙임
         u = torch.cat(node_output_list, dim=0)  # [total_num_nodes, hidden_dim]
         # node_output_concat = torch.cat(node_output_list, dim=0)
 
+        # u에 MLP 적용하여 u' 생성
         u_prime = self.u_mlp(u)
         
+        # 노드 특성 재구성: u'를 사용
         x_recon = self.feature_decoder(u_prime)
         # x_recon = self.feature_decoder(node_output_concat)
                 
+        # 인접행렬 재구성
         adj_recon_list = []
         idx = 0
         for i in range(num_graphs):
@@ -782,7 +725,7 @@ class GRAPH_AUTOENCODER(nn.Module):
             edge_index_list.append(edge_index)
             start_idx += num_nodes
         return torch.cat(edge_index_list, dim=1)
-
+    
 
 #%%
 '''DATASETS'''
@@ -812,7 +755,6 @@ scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=factor, patience=pat
 
 
 # %%
-'''RUN'''
 def run(dataset_name, random_seed, dataset_AN, split=None, device=device):
     all_results = []
     set_seed(random_seed)
@@ -823,7 +765,7 @@ def run(dataset_name, random_seed, dataset_AN, split=None, device=device):
 
     model = GRAPH_AUTOENCODER(num_features, hidden_dims, max_nodes, dropout_rate=dropout_rate).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-    scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=factor, patience=patience, verbose=True)
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=factor, patience=patience, verbose=True)
 
     train_loader = loaders['train']
     test_loader = loaders['test']
@@ -833,25 +775,31 @@ def run(dataset_name, random_seed, dataset_AN, split=None, device=device):
     train_cls_outputs = []
 
     for epoch in range(1, epochs+1):
-        fold_start = time.time()  # 현재 폴드 시작 시간
         train_loss, num_sample, train_cls_outputs = train(model, train_loader, optimizer, max_nodes, device)
         
         info_train = 'Epoch {:3d}, Loss {:.4f}'.format(epoch, train_loss)
 
         if epoch % log_interval == 0:
-            
             kmeans, cluster_centers = perform_clustering(train_cls_outputs, random_seed, n_clusters=n_cluster)
-            # cluster_assignments, cluster_centers, cluster_sizes, n_clusters = analyze_clusters(train_cls_outputs)
             
-            # cluster_centers = train_cls_outputs.mean(dim=0)
-            # cluster_centers = cluster_centers.detach().cpu().numpy()
-            # cluster_centers = cluster_centers.reshape(-1, hidden_dims[-1])
-
             auroc, auprc, precision, recall, f1, test_loss, test_loss_anomaly = evaluate_model(model, test_loader, max_nodes, cluster_centers, device)
-            scheduler.step(auroc)
+            
+            scheduler.step(train_loss)
             
             all_results.append((auroc, auprc, precision, recall, f1, test_loss, test_loss_anomaly))
             print(f'Epoch {epoch+1}: Training Loss = {train_loss:.4f}, Validation loss = {test_loss:.4f}, Validation loss anomaly = {test_loss_anomaly:.4f}, Validation AUC = {auroc:.4f}, Validation AUPRC = {auprc:.4f}, Precision = {precision:.4f}, Recall = {recall:.4f}, F1 = {f1:.4f}')
+            wandb.log({
+                "epoch": epoch,
+                "train_loss": train_loss,
+                "val_loss": test_loss,
+                "val_loss_anomaly": test_loss_anomaly,
+                "auroc": auroc,
+                "auprc": auprc,
+                "precision": precision,
+                "recall": recall,
+                "f1": f1,
+                "learning_rate": optimizer.param_groups[0]['lr']
+            })
             
             info_test = 'AD_AUC:{:.4f}, AD_AUPRC:{:.4f}, Test_Loss:{:.4f}, Test_Loss_Anomaly:{:.4f}'.format(auroc, auprc, test_loss, test_loss_anomaly)
 
@@ -861,32 +809,21 @@ def run(dataset_name, random_seed, dataset_AN, split=None, device=device):
 
 
 #%%
-'''MAIN'''
 if __name__ == '__main__':
     ad_aucs = []
-    fold_times = []
     splits = get_ad_split_TU(dataset_name, n_cross_val)    
 
-    start_time = time.time()  # 전체 실행 시작 시간
-
     for trial in range(n_cross_val):
-        fold_start = time.time()  # 현재 폴드 시작 시간
-
         print(f"Starting fold {trial + 1}/{n_cross_val}")
         ad_auc = run(dataset_name, random_seed, dataset_AN, split=splits[trial])
         ad_aucs.append(ad_auc)
-        
-        fold_end = time.time()  # 현재 폴드 종료 시간
-        fold_duration = fold_end - fold_start  # 현재 폴드 실행 시간
-        fold_times.append(fold_duration)
-        
-        print(f"Fold {trial + 1} finished in {fold_duration:.2f} seconds.")
-        
-    total_time = time.time() - start_time  # 전체 실행 시간
+
     results = 'AUC: {:.2f}+-{:.2f}'.format(np.mean(ad_aucs) * 100, np.std(ad_aucs) * 100)
     print(len(ad_aucs))
-    print('[FINAL RESULTS] ' + results)
-    print(f"Total execution time: {total_time:.2f} seconds")
 
+    print('[FINAL RESULTS] ' + results)
     
+wandb.finish()
+
+
 # %%
