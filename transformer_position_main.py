@@ -67,7 +67,8 @@ def train(model, train_loader, optimizer, max_nodes, device):
             end_node = start_node + num_nodes
 
             # Adjacency reconstruction loss
-            adj_loss = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2 / num_nodes
+            # adj_loss = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2 / num_nodes
+            adj_loss = F.binary_cross_entropy(adj_recon_list[i], adj[i]) 
             adj_loss = adj_loss * adj_theta
             
             # z_node_loss = torch.norm(z_tilde[start_node:end_node] - z_[start_node:end_node], p='fro')**2 / num_nodes
@@ -80,14 +81,15 @@ def train(model, train_loader, optimizer, max_nodes, device):
         
         print(f'train_adj_loss: {loss}')
         
-        node_loss = torch.norm(x_recon - x, p='fro')**2
+        node_loss = (torch.norm(x_recon - x, p='fro')**2) / max_nodes
         node_loss = node_loss * node_theta
         print(f'train_node loss: {node_loss}')
             
-        dissimmilar = mean_euclidean_distance_loss(train_cls_outputs)
-        print(f'dissimmilar: {dissimmilar}')
+        # dissimmilar = mean_euclidean_distance_loss(train_cls_outputs)
+        # dissimmilar = dissimmilar * 5
+        # print(f'dissimmilar: {dissimmilar}')
         
-        loss += node_loss + dissimmilar
+        loss += node_loss
         num_sample += num_graphs
 
         loss.backward()
@@ -187,26 +189,26 @@ parser.add_argument("--assets-root", type=str, default="./assets")
 parser.add_argument("--epochs", type=int, default=100)
 parser.add_argument("--patience", type=int, default=5)
 parser.add_argument("--n-cluster", type=int, default=3)
+parser.add_argument("--step-size", type=int, default=20)
 parser.add_argument("--n-cross-val", type=int, default=5)
 parser.add_argument("--random-seed", type=int, default=0)
 parser.add_argument("--batch-size", type=int, default=300)
-parser.add_argument("--log_interval", type=int, default=5)
+parser.add_argument("--log-interval", type=int, default=5)
 parser.add_argument("--n-test-anomaly", type=int, default=400)
 parser.add_argument("--test-batch-size", type=int, default=128)
 parser.add_argument("--hidden-dims", nargs='+', type=int, default=[256, 128])
 
 parser.add_argument("--factor", type=float, default=0.5)
-parser.add_argument("--step-size", type=int, default=20)
 parser.add_argument("--test-size", type=float, default=0.25)
 parser.add_argument("--dropout-rate", type=float, default=0.1)
 parser.add_argument("--weight-decay", type=float, default=0.0001)
-parser.add_argument("--learning-rate", type=float, default=0.0001)
+parser.add_argument("--learning-rate", type=float, default=0.001
 
 parser.add_argument("--alpha", type=float, default=0.3)
-parser.add_argument("--beta", type=float, default=0.025)
-parser.add_argument("--gamma", type=float, default=0.25)
+parser.add_argument("--beta", type=float, default=0.05)
+parser.add_argument("--gamma", type=float, default=1.0)
 parser.add_argument("--node-theta", type=float, default=0.03)
-parser.add_argument("--adj-theta", type=float, default=0.005)
+parser.add_argument("--adj-theta", type=float, default=0.01)
 
 try:
     args = parser.parse_args()
@@ -484,9 +486,9 @@ class HybridTransformerEncoder(nn.Module):
         return output
     
     
-class TransformerEncoder(nn.Module):
+class TransformerEncoder_(nn.Module):
     def __init__(self, d_model, nhead, num_layers, dim_feedforward, max_nodes, dropout=0.1):
-        super(TransformerEncoder, self).__init__()
+        super(TransformerEncoder_, self).__init__()
         self.positional_encoding = GraphBertPositionalEncoding(d_model, max_nodes)
         # encoder_layer = nn.TransformerEncoderLayer(
         #     d_model, nhead, dim_feedforward, dropout, activation='relu', batch_first=True
@@ -545,6 +547,64 @@ class TransformerEncoder(nn.Module):
         # output_T = output_T.transpose(0, 1)  # [batch_size, seq_len, hidden_dim]
         
         return output
+
+
+class TransformerEncoder(nn.Module):
+    def __init__(self, d_model, nhead, num_layers, dim_feedforward, max_nodes, dropout=0.1):
+        super(TransformerEncoder, self).__init__()
+        self.positional_encoding = GraphBertPositionalEncoding(d_model, max_nodes)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model, nhead, dim_feedforward, dropout, activation='relu', batch_first=True
+        )
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers)
+        self.d_model = d_model
+
+    def forward(self, src, edge_index_list, src_key_padding_mask, src_first=True):
+        batch_size = src.size(0)
+        max_seq_len = src.size(1)
+        
+        # 각 그래프에 대해 포지셔널 인코딩 계산
+        pos_encodings = []
+        for i in range(batch_size):
+            # CLS 토큰을 위한 더미 인코딩
+            cls_pos_encoding = torch.zeros(1, self.d_model).to(src.device)
+            
+            # 실제 노드들의 포지셔널 인코딩
+            num_nodes = (~src_key_padding_mask[i][1:]).sum().item()
+            
+            # 문제 발생 위치
+            if num_nodes > 0:
+                graph_pos_encoding = self.positional_encoding( 
+                    edge_index_list[i], num_nodes
+                )
+                # 패딩
+                padded_pos_encoding = F.pad(
+                    graph_pos_encoding, 
+                    (0, 0, 0, max_seq_len - num_nodes - 1), 
+                    'constant', 0
+                )
+            else:
+                padded_pos_encoding = torch.zeros(max_seq_len - 1, d_model).to(src.device)
+            
+            # CLS 토큰 인코딩과 노드 인코딩 결합
+            full_pos_encoding = torch.cat([cls_pos_encoding, padded_pos_encoding], dim=0)
+            pos_encodings.append(full_pos_encoding)
+        
+        # 모든 배치의 포지셔널 인코딩 결합
+        pos_encoding_batch = torch.stack(pos_encodings)
+        # 포지셔널 인코딩 추가
+        src_ = src + pos_encoding_batch
+        
+        if src_first = True:
+            output = self.transformer_encoder(src_, src_key_padding_mask=src_key_padding_mask)
+        else:
+            src_ = src_.transpose(0, 1)  # [seq_len, batch_size, hidden_dim]
+            src_key_padding_mask_ = src_key_padding_mask.transpose(0, 1)
+            output = self.transformer_encoder(src_, src_key_padding_mask=src_key_padding_mask)
+            output = output.transpose(0, 1)  # [batch_size, seq_len, hidden_dim]
+            
+        return output
+
 
 def perform_clustering(train_cls_outputs, random_seed, n_clusters):
     # train_cls_outputs가 이미 텐서이므로, 그대로 사용
@@ -744,7 +804,7 @@ def run(dataset_name, random_seed, dataset_AN, split=None, device=device):
 
     model = GRAPH_AUTOENCODER(num_features, hidden_dims, max_nodes, dropout_rate=dropout_rate).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-    scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=factor, patience=patience, verbose=True)
+    # scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=factor, patience=patience, verbose=True)
 
     train_loader = loaders['train']
     test_loader = loaders['test']
@@ -761,15 +821,15 @@ def run(dataset_name, random_seed, dataset_AN, split=None, device=device):
 
         if epoch % log_interval == 0:
             
-            # kmeans, cluster_centers = perform_clustering(train_cls_outputs, random_seed, n_clusters=n_cluster)
+            kmeans, cluster_centers = perform_clustering(train_cls_outputs, random_seed, n_clusters=n_cluster)
             # cluster_assignments, cluster_centers, cluster_sizes, n_clusters = analyze_clusters(train_cls_outputs)
             
-            cluster_centers = train_cls_outputs.mean(dim=0)
-            cluster_centers = cluster_centers.detach().cpu().numpy()
-            cluster_centers = cluster_centers.reshape(-1, hidden_dims[-1])
+            # cluster_centers = train_cls_outputs.mean(dim=0)
+            # cluster_centers = cluster_centers.detach().cpu().numpy()
+            # cluster_centers = cluster_centers.reshape(-1, hidden_dims[-1])
 
             auroc, auprc, precision, recall, f1, test_loss, test_loss_anomaly = evaluate_model(model, test_loader, max_nodes, cluster_centers, device)
-            scheduler.step(auroc)
+            # scheduler.step(auroc)
             
             all_results.append((auroc, auprc, precision, recall, f1, test_loss, test_loss_anomaly))
             print(f'Epoch {epoch+1}: Training Loss = {train_loss:.4f}, Validation loss = {test_loss:.4f}, Validation loss anomaly = {test_loss_anomaly:.4f}, Validation AUC = {auroc:.4f}, Validation AUPRC = {auprc:.4f}, Precision = {precision:.4f}, Recall = {recall:.4f}, F1 = {f1:.4f}')
