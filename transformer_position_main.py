@@ -56,9 +56,8 @@ def train(model, train_loader, optimizer, max_nodes, device):
         x, edge_index, batch, num_graphs = data.x, data.edge_index, data.batch, data.num_graphs
 
         adj = adj_original(edge_index, batch, max_nodes)
-        # print(f'adj: {adj[0][:7,:7]}')
         x_recon, adj_recon_list, train_cls_outputs, z_ = model(x, edge_index, batch, num_graphs)
-        # print(f'adj_recon: {adj_recon_list[0][:7,:7]}')
+
         
         loss = 0
         start_node = 0
@@ -66,9 +65,8 @@ def train(model, train_loader, optimizer, max_nodes, device):
             num_nodes = (batch == i).sum().item()
             end_node = start_node + num_nodes
 
-            # Adjacency reconstruction loss
             # adj_loss = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2 / num_nodes
-            adj_loss = F.binary_cross_entropy(adj_recon_list[i], adj[i]) 
+            adj_loss = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2
             adj_loss = adj_loss * adj_theta
             
             # z_node_loss = torch.norm(z_tilde[start_node:end_node] - z_[start_node:end_node], p='fro')**2 / num_nodes
@@ -186,7 +184,7 @@ parser.add_argument("--dataset-name", type=str, default='COX2')
 parser.add_argument("--data-root", type=str, default='./dataset')
 parser.add_argument("--assets-root", type=str, default="./assets")
 
-parser.add_argument("--epochs", type=int, default=100)
+parser.add_argument("--epochs", type=int, default=200)
 parser.add_argument("--patience", type=int, default=5)
 parser.add_argument("--n-cluster", type=int, default=3)
 parser.add_argument("--step-size", type=int, default=20)
@@ -202,7 +200,7 @@ parser.add_argument("--factor", type=float, default=0.5)
 parser.add_argument("--test-size", type=float, default=0.25)
 parser.add_argument("--dropout-rate", type=float, default=0.1)
 parser.add_argument("--weight-decay", type=float, default=0.0001)
-parser.add_argument("--learning-rate", type=float, default=0.001
+parser.add_argument("--learning-rate", type=float, default=0.0001)
 
 parser.add_argument("--alpha", type=float, default=0.3)
 parser.add_argument("--beta", type=float, default=0.05)
@@ -553,13 +551,17 @@ class TransformerEncoder(nn.Module):
     def __init__(self, d_model, nhead, num_layers, dim_feedforward, max_nodes, dropout=0.1):
         super(TransformerEncoder, self).__init__()
         self.positional_encoding = GraphBertPositionalEncoding(d_model, max_nodes)
-        encoder_layer = nn.TransformerEncoderLayer(
+        encoder_layer_n = nn.TransformerEncoderLayer(
             d_model, nhead, dim_feedforward, dropout, activation='relu', batch_first=True
         )
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers)
+        encoder_layer_g = nn.TransformerEncoderLayer(
+            d_model, nhead, dim_feedforward, dropout, activation='relu', batch_first=True
+        )
+        self.transformer_encoder_n = nn.TransformerEncoder(encoder_layer_n, num_layers)
+        self.transformer_encoder_g = nn.TransformerEncoder(encoder_layer_g, num_layers)
         self.d_model = d_model
 
-    def forward(self, src, edge_index_list, src_key_padding_mask, src_first=True):
+    def forward(self, src, edge_index_list, src_key_padding_mask):
         batch_size = src.size(0)
         max_seq_len = src.size(1)
         
@@ -595,13 +597,12 @@ class TransformerEncoder(nn.Module):
         # 포지셔널 인코딩 추가
         src_ = src + pos_encoding_batch
         
-        if src_first = True:
-            output = self.transformer_encoder(src_, src_key_padding_mask=src_key_padding_mask)
-        else:
-            src_ = src_.transpose(0, 1)  # [seq_len, batch_size, hidden_dim]
-            src_key_padding_mask_ = src_key_padding_mask.transpose(0, 1)
-            output = self.transformer_encoder(src_, src_key_padding_mask=src_key_padding_mask)
-            output = output.transpose(0, 1)  # [batch_size, seq_len, hidden_dim]
+        src_ = src_.transpose(0, 1)  # [seq_len, batch_size, hidden_dim]
+        src_key_padding_mask_ = src_key_padding_mask.transpose(0, 1)
+        output_ = self.transformer_encoder_g(src_, src_key_padding_mask=src_key_padding_mask_)
+        output = output_.transpose(0, 1)  # [batch_size, seq_len, hidden_dim]
+        
+        output = self.transformer_encoder_n(output, src_key_padding_mask=src_key_padding_mask)
             
         return output
 
@@ -648,7 +649,7 @@ class GRAPH_AUTOENCODER(nn.Module):
         self.transformer = TransformerEncoder(
             d_model=hidden_dims[-1],
             nhead=8,
-            num_layers=4,
+            num_layers=2,
             dim_feedforward=hidden_dims[-1] * 4,
             max_nodes=max_nodes,
             dropout=dropout_rate
@@ -821,12 +822,12 @@ def run(dataset_name, random_seed, dataset_AN, split=None, device=device):
 
         if epoch % log_interval == 0:
             
-            kmeans, cluster_centers = perform_clustering(train_cls_outputs, random_seed, n_clusters=n_cluster)
+            # kmeans, cluster_centers = perform_clustering(train_cls_outputs, random_seed, n_clusters=n_cluster)
             # cluster_assignments, cluster_centers, cluster_sizes, n_clusters = analyze_clusters(train_cls_outputs)
             
-            # cluster_centers = train_cls_outputs.mean(dim=0)
-            # cluster_centers = cluster_centers.detach().cpu().numpy()
-            # cluster_centers = cluster_centers.reshape(-1, hidden_dims[-1])
+            cluster_centers = train_cls_outputs.mean(dim=0)
+            cluster_centers = cluster_centers.detach().cpu().numpy()
+            cluster_centers = cluster_centers.reshape(-1, hidden_dims[-1])
 
             auroc, auprc, precision, recall, f1, test_loss, test_loss_anomaly = evaluate_model(model, test_loader, max_nodes, cluster_centers, device)
             # scheduler.step(auroc)
