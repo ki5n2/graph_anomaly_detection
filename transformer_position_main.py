@@ -65,8 +65,7 @@ def train(model, train_loader, optimizer, max_nodes, device):
             num_nodes = (batch == i).sum().item()
             end_node = start_node + num_nodes
 
-            # adj_loss = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2 / num_nodes
-            adj_loss = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2
+            adj_loss = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2 / num_nodes
             adj_loss = adj_loss * adj_theta
             
             # z_node_loss = torch.norm(z_tilde[start_node:end_node] - z_[start_node:end_node], p='fro')**2 / num_nodes
