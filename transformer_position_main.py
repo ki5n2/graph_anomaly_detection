@@ -58,7 +58,6 @@ def train(model, train_loader, optimizer, max_nodes, device):
         adj = adj_original(edge_index, batch, max_nodes)
         x_recon, adj_recon_list, train_cls_outputs, z_ = model(x, edge_index, batch, num_graphs)
 
-        
         loss = 0
         start_node = 0
         for i in range(num_graphs):
@@ -496,7 +495,6 @@ class TransformerEncoder_(nn.Module):
         # self.transformer_encoder1 = nn.TransformerEncoder(encoder_layer, num_layers)
         # self.transformer_encoder2 = nn.TransformerEncoder(encoder_layer, num_layers)
         
-
     def forward(self, src, edge_index_list, src_key_padding_mask):
         batch_size = src.size(0)
         max_seq_len = src.size(1)
