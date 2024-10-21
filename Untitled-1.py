@@ -191,7 +191,7 @@ parser.add_argument("--step-size", type=int, default=20)
 parser.add_argument("--n-cross-val", type=int, default=5)
 parser.add_argument("--random-seed", type=int, default=0)
 parser.add_argument("--batch-size", type=int, default=300)
-parser.add_argument("--log-interval", type=int, default=5)
+parser.add_argument("--log-interval", type=int, default=10)
 parser.add_argument("--n-test-anomaly", type=int, default=400)
 parser.add_argument("--test-batch-size", type=int, default=128)
 parser.add_argument("--hidden-dims", nargs='+', type=int, default=[256, 128])
@@ -203,8 +203,8 @@ parser.add_argument("--weight-decay", type=float, default=0.0001)
 parser.add_argument("--learning-rate", type=float, default=0.0001)
 
 parser.add_argument("--alpha", type=float, default=0.5)
-parser.add_argument("--beta", type=float, default=0.05)
-parser.add_argument("--gamma", type=float, default=1.0)
+parser.add_argument("--beta", type=float, default=0.025)
+parser.add_argument("--gamma", type=float, default=0.25)
 parser.add_argument("--node-theta", type=float, default=0.03)
 parser.add_argument("--adj-theta", type=float, default=0.01)
 
@@ -565,7 +565,7 @@ class TransformerEncoder(nn.Module):
         #     d_model, nhead, dim_feedforward, dropout, activation='relu', batch_first=True
         # )
         encoder_layer_g = nn.TransformerEncoderLayer(
-            d_model, nhead, dim_feedforward, dropout, activation='relu', batch_first=True
+            d_model, nhead, dim_feedforward, dropout, activation='relu'
         )
         # self.transformer_encoder_n = nn.TransformerEncoder(encoder_layer_n, num_layers)
         self.transformer_encoder_g = nn.TransformerEncoder(encoder_layer_g, num_layers)
@@ -609,13 +609,13 @@ class TransformerEncoder(nn.Module):
         src_ = src + pos_encoding_batch
         print(src_.shape)
         
-        # src_ = src_.transpose(0, 1)  # [seq_len, batch_size, hidden_dim]
-        # print(src_.shape)
+        src_ = src_.transpose(0, 1)  # [seq_len, batch_size, hidden_dim]
+        print(src_.shape)
         print(src_key_padding_mask.shape)
         # src_key_padding_mask_ = src_key_padding_mask.transpose(0, 1)
         # print(src_key_padding_mask_.shape)
-        output = self.transformer_encoder_g(src_, src_key_padding_mask=src_key_padding_mask)
-        # output = output_.transpose(0, 1)  # [batch_size, seq_len, hidden_dim]
+        output_ = self.transformer_encoder_g(src_, src_key_padding_mask=src_key_padding_mask)
+        output = output_.transpose(0, 1)  # [batch_size, seq_len, hidden_dim]
         
         # output = self.transformer_encoder_n(output, src_key_padding_mask=src_key_padding_mask)
             
