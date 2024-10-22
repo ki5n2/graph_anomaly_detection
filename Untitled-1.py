@@ -67,19 +67,19 @@ def train(model, train_loader, optimizer, max_nodes, device):
             adj_loss = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2 / num_nodes
             adj_loss = adj_loss * adj_theta
             
-            # z_node_loss = torch.norm(z_tilde[start_node:end_node] - z_[start_node:end_node], p='fro')**2 / num_nodes
-            # z_node_loss = z_node_loss * 0.3
-            # print(f'train_z_node loss: {z_node_loss}')
-            
             loss += adj_loss
             
             start_node = end_node
         
         print(f'train_adj_loss: {loss}')
-        
+     
         node_loss = (torch.norm(x_recon - x, p='fro')**2) / max_nodes
         node_loss = node_loss * node_theta
         print(f'train_node loss: {node_loss}')
+        
+        # z_node_loss = torch.norm(z_tilde - z_, p='fro')**2 / num_nodes
+        # z_node_loss = z_node_loss * 0.3
+        # print(f'train_z_node loss: {z_node_loss}z')
         
         # dissimmilar = calculate_dissimilarity(cluster_centers).item()
         # dissimmilar = dissimmilar * 10
@@ -180,7 +180,7 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
 '''ARGPARSER'''
 parser = argparse.ArgumentParser()
 
-parser.add_argument("--dataset-name", type=str, default='COX2')
+parser.add_argument("--dataset-name", type=str, default='DHFR')
 parser.add_argument("--data-root", type=str, default='./dataset')
 parser.add_argument("--assets-root", type=str, default="./assets")
 
@@ -200,7 +200,7 @@ parser.add_argument("--factor", type=float, default=0.5)
 parser.add_argument("--test-size", type=float, default=0.25)
 parser.add_argument("--dropout-rate", type=float, default=0.1)
 parser.add_argument("--weight-decay", type=float, default=0.0001)
-parser.add_argument("--learning-rate", type=float, default=0.0001)
+parser.add_argument("--learning-rate", type=float, default=0.001)
 
 parser.add_argument("--alpha", type=float, default=0.5)
 parser.add_argument("--beta", type=float, default=0.025)
@@ -768,8 +768,8 @@ class GRAPH_AUTOENCODER(nn.Module):
             adj_recon_list.append(adj_recon)
             idx += num_nodes
         
-        # new_edge_index = self.get_edge_index_from_adj_list(adj_recon_list, batch).to(device)
-        # z_tilde = self.encoder(x_recon, new_edge_index)
+        new_edge_index = self.get_edge_index_from_adj_list(adj_recon_list, batch).to(device)
+        z_tilde = self.encoder(x_recon, new_edge_index)
         
         return x_recon, adj_recon_list, cls_output, z_
 
