@@ -60,7 +60,7 @@ def train_bert_embedding(model, train_loader, bert_optimizer, device):
         mask_indices = torch.rand(x.size(0), device=device) < 0.15  # 15% 노드 마스킹
         
         # BERT 인코딩 및 마스크 토큰 예측만 수행
-        _, _, _, masked_outputs, z = model(
+        _, _, _, z, masked_outputs = model(
             x, edge_index, batch, num_graphs, mask_indices, training=True
         )
         
@@ -90,7 +90,7 @@ def train(model, train_loader, recon_optimizer, max_nodes, device):
         data = data.to(device)
         x, edge_index, batch, num_graphs = data.x, data.edge_index, data.batch, data.num_graphs
         
-        x_recon, adj_recon_list, train_cls_outputs, z_ = model(x, edge_index, batch, num_graphs, training=False)
+        x_recon, adj_recon_list, train_cls_outputs, z_ = model(x, edge_index, batch, num_graphs)
 
         adj = adj_original(edge_index, batch, max_nodes)
         loss = 0
@@ -141,7 +141,7 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
 
             adj = adj_original(edge_index, batch, max_nodes)
 
-            x_recon, adj_recon_list, e_cls_output, z_ = model(x, edge_index, batch, num_graphs, training=False)
+            x_recon, adj_recon_list, e_cls_output, z_ = model(x, edge_index, batch, num_graphs)
 
             recon_errors = []
             start_node = 0
@@ -212,7 +212,7 @@ parser.add_argument("--assets-root", type=str, default="./assets")
 
 parser.add_argument("--n-head", type=int, default=8)
 parser.add_argument("--n-layer", type=int, default=6)
-parser.add_argument("--epochs", type=int, default=200)
+parser.add_argument("--epochs", type=int, default=100)
 parser.add_argument("--patience", type=int, default=5)
 parser.add_argument("--n-cluster", type=int, default=3)
 parser.add_argument("--step-size", type=int, default=20)
@@ -228,13 +228,13 @@ parser.add_argument("--factor", type=float, default=0.5)
 parser.add_argument("--test-size", type=float, default=0.25)
 parser.add_argument("--dropout-rate", type=float, default=0.1)
 parser.add_argument("--weight-decay", type=float, default=0.0001)
-parser.add_argument("--learning-rate", type=float, default=0.0001)
+parser.add_argument("--learning-rate", type=float, default=0.001)
 
 parser.add_argument("--alpha", type=float, default=0.3)
 parser.add_argument("--beta", type=float, default=0.05)
 parser.add_argument("--gamma", type=float, default=1.0)
 parser.add_argument("--node-theta", type=float, default=0.03)
-parser.add_argument("--adj-theta", type=float, default=0.01)
+parser.add_argument("--adj-theta", type=float, default=0.025)
 
 try:
     args = parser.parse_args()
@@ -297,7 +297,7 @@ class BertEncoder(nn.Module):
         
         # BERT 스타일 트랜스포머 레이어
         encoder_layer = nn.TransformerEncoderLayer(
-            hidden_dims[-1], nhead, hidden_dims[-1] * 4, dropout_rate, activation='gelu'
+            hidden_dims[-1], nhead, hidden_dims[-1] * 4, dropout_rate, activation='relu'
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers)
         
@@ -478,14 +478,11 @@ class TransformerEncoder(nn.Module):
     def __init__(self, d_model, nhead, num_layers, dim_feedforward, max_nodes, dropout=0.1):
         super(TransformerEncoder, self).__init__()
         self.positional_encoding = GraphBertPositionalEncoding(d_model, max_nodes)
-        encoder_layer_n = nn.TransformerEncoderLayer(
-            d_model, nhead, dim_feedforward, dropout, activation='relu', batch_first=True
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model, nhead, dim_feedforward, dropout, activation='relu'
         )
-        encoder_layer_g = nn.TransformerEncoderLayer(
-            d_model, nhead, dim_feedforward, dropout, activation='relu', batch_first=True
-        )
-        self.transformer_encoder_n = nn.TransformerEncoder(encoder_layer_n, num_layers)
-        self.transformer_encoder_g = nn.TransformerEncoder(encoder_layer_g, num_layers)
+        
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers)
         self.d_model = d_model
 
     def forward(self, src, edge_index_list, src_key_padding_mask):
@@ -525,11 +522,11 @@ class TransformerEncoder(nn.Module):
         src_ = src + pos_encoding_batch
         
         src_ = src_.transpose(0, 1)  # [seq_len, batch_size, hidden_dim]
-        src_key_padding_mask_ = src_key_padding_mask.transpose(0, 1)
-        output_ = self.transformer_encoder_g(src_, src_key_padding_mask=src_key_padding_mask_)
+        # src_key_padding_mask_ = src_key_padding_mask.transpose(0, 1)
+        output_ = self.transformer_encoder(src_, src_key_padding_mask=src_key_padding_mask)
         output = output_.transpose(0, 1)  # [batch_size, seq_len, hidden_dim]
         
-        output = self.transformer_encoder_n(output, src_key_padding_mask=src_key_padding_mask)
+        # output = self.transformer_encoder_n(output, src_key_padding_mask=src_key_padding_mask)
             
         return output
 
@@ -596,7 +593,8 @@ class GRAPH_AUTOENCODER(nn.Module):
             z = self.encoder(
                 x, edge_index, batch, training=False
             )
-            
+        print(mask_indices)
+        print(training)
         z_list = [z[batch == i] for i in range(num_graphs)] # 그래프 별 z 저장 (batch_size, num nodes, feature dim)
         edge_index_list = [] # 그래프 별 엣지 인덱스 저장 (batch_size), edge_index_list[0] = (2 x m), m is # of edges
         start_idx = 0
@@ -656,9 +654,9 @@ class GRAPH_AUTOENCODER(nn.Module):
             idx += num_nodes
         
         if training and mask_indices is not None:
-            return x_recon, adj_recon_list, cls_output, masked_outputs, z
+            return x_recon, adj_recon_list, cls_output, z, masked_outputs
         
-        return x_recon, adj_recon_list,  cls_output, None, z
+        return x_recon, adj_recon_list, cls_output, z
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -702,6 +700,9 @@ def run(dataset_name, random_seed, dataset_AN, split=None, device=device):
     num_features = meta['num_feat']
     max_nodes = meta['max_nodes']
 
+    # BERT 모델 저장 경로
+    bert_save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/BERT_model/pretrained_bert_{dataset_name}_seed{random_seed}_epochs{epochs}_try0.pth'
+    
     model = GRAPH_AUTOENCODER(
         num_features=num_features, 
         hidden_dims=hidden_dims, 
@@ -719,19 +720,31 @@ def run(dataset_name, random_seed, dataset_AN, split=None, device=device):
     train_cls_outputs = []
     
     # 1단계: BERT 임베딩 학습
-    print("Stage 1: Training BERT embeddings...")
-    bert_optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    bert_scheduler = ReduceLROnPlateau(bert_optimizer, mode='min', factor=factor, patience=patience)
+    if os.path.exists(bert_save_path):
+        print("Loading pretrained BERT...")
+        # BERT 인코더의 가중치만 로드
+        model.encoder.load_state_dict(torch.load(bert_save_path))
+    else:
+        print("Training BERT from scratch...")
+        # 1단계: BERT 임베딩 학습
+        print("Stage 1: Training BERT embeddings...")
+
+        bert_optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+        bert_scheduler = ReduceLROnPlateau(bert_optimizer, mode='min', factor=factor, patience=patience)
     
-    for epoch in range(1, epochs+1):
-        train_loss, num_sample, node_embeddings = train_bert_embedding(
-            model, train_loader, bert_optimizer, device
-        )
-        bert_scheduler.step(train_loss)
+        for epoch in range(1, epochs+1):
+            train_loss, num_sample, node_embeddings = train_bert_embedding(
+                model, train_loader, bert_optimizer, device
+            )
+            bert_scheduler.step(train_loss)
+            
+            if epoch % log_interval == 0:
+                print(f'BERT Training Epoch {epoch}: Loss = {train_loss:.4f}')
+                
+        # 학습된 BERT 저장
+        print("Saving pretrained BERT...")
+        torch.save(model.encoder.state_dict(), bert_save_path)
         
-        if epoch % log_interval == 0:
-            print(f'BERT Training Epoch {epoch}: Loss = {train_loss:.4f}')
-    
     # 2단계: 재구성 학습
     print("\nStage 2: Training reconstruction...")
     recon_optimizer = torch.optim.Adam(
@@ -780,7 +793,7 @@ if __name__ == '__main__':
 
     start_time = time.time()  # 전체 실행 시작 시간
 
-    for trial in range(n_cross_val):
+    for trial in range(1):
         fold_start = time.time()  # 현재 폴드 시작 시간
 
         print(f"Starting fold {trial + 1}/{n_cross_val}")
@@ -800,4 +813,5 @@ if __name__ == '__main__':
     print(f"Total execution time: {total_time:.2f} seconds")
 
     
+
 # %%

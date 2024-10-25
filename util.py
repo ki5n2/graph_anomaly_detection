@@ -237,13 +237,14 @@ def get_ad_split_TU(dataset_name, n_cross_val):
 
     return splits
 
-def get_data_loaders_TU(dataset_name, batch_size, test_batch_size, split, dataset_AN):
+
+def get_data_loaders_TU_(dataset_name, batch_size, test_batch_size, split, dataset_AN):
     path = osp.join(osp.dirname(osp.realpath(__file__)), 'dataset')
     dataset_ = TUDataset(path, name=dataset_name)
         
     prefix = os.path.join(path, dataset_name, 'raw', dataset_name)
-    filename_node_attrs=prefix + '_node_attributes.txt'
-    node_attrs=[]
+    filename_node_attrs = prefix + '_node_attributes.txt'
+    node_attrs = []
 
     try:
         with open(filename_node_attrs) as f:
@@ -311,6 +312,104 @@ def get_data_loaders_TU(dataset_name, batch_size, test_batch_size, split, datase
     dataloader_test = DataLoader(data_test, batch_size, shuffle=True)
     meta = {'num_feat':dataset_num_features, 'num_train':len(data_train), 'num_test':len(data_test), 'num_edge_feat':0, 'max_nodes':max_nodes}
     loader_dict = {'train': dataloader, 'test': dataloader_test}
+    
+    return loader_dict, meta
+
+
+#%%
+def get_data_loaders_TU(dataset_name, batch_size, test_batch_size, split, dataset_AN):
+    path = osp.join(osp.dirname(osp.realpath(__file__)), 'dataset')
+    dataset_ = TUDataset(path, name=dataset_name)
+        
+    prefix = os.path.join(path, dataset_name, 'raw', dataset_name)
+
+    filename_node_attrs = prefix + '_node_attributes.txt'
+    node_attrs = []
+    try:
+        with open(filename_node_attrs) as f:
+            for line in f:
+                line = line.strip("\s\n")
+                attrs = [float(attr) for attr in re.split("[,\s]+", line) if not attr == '']
+                node_attrs.append(np.array(attrs))
+    except IOError:
+        print('No node attributes')
+        
+    node_attrs = np.array(node_attrs)
+
+    filename_nodes = prefix + '_node_labels.txt'
+    node_labels = []
+    try:
+        with open(filename_nodes) as f:
+            for line in f:
+                line = line.strip("\n")
+                node_labels += [int(line) - 1]
+        num_unique_node_labels = max(node_labels) + 1
+    except IOError:
+        print('No node labels')
+    max_node_label = max(node_labels)
+    
+    dataset = []
+    node_idx = 0
+    for i in range(len(dataset_)):
+        old_data = dataset_[i]
+        num_nodes = old_data.num_nodes
+        new_x = torch.tensor(node_attrs[node_idx:node_idx+num_nodes], dtype=torch.float)
+        node_label_graph =  torch.tensor(node_labels[node_idx:node_idx+num_nodes], dtype=torch.float)
+        
+        if new_x.shape[0] == node_label_graph.shape[0]:
+            print(True)
+        else:
+            print(False)
+        
+        if dataset_name != 'NCI1':
+            new_data = Data(x=new_x, edge_index=old_data.edge_index, y=old_data.y, node_label = node_label_graph)
+        else:
+            new_data = Data(x=old_data.x, edge_index=old_data.edge_index, y=old_data.y, node_label = node_label_graph)
+        
+        dataset.append(new_data)
+        node_idx += num_nodes
+
+    dataset_num_features = dataset[0].x.shape[1]
+    # print(dataset[0].x)  # 새 데이터셋의 첫 번째 그래프 x 확인
+    
+    data_list = []
+    label_list = []
+
+    for data in dataset:
+        data_list.append(data)
+        label_list.append(data.y.item())
+
+    (train_index, test_index) = split
+    data_train_ = [data_list[i] for i in train_index]
+    data_test = [data_list[i] for i in test_index]
+
+    data_train = []
+    if dataset_AN:
+        for data in data_train_:
+            if data.y != 0:
+                data_train.append(data) 
+    else:
+        for data in data_train_:
+            if data.y == 0:
+                data_train.append(data) 
+
+    if dataset_AN:
+        idx = 0
+        for data in data_train:
+            data.y = 0
+            data['idx'] = idx
+            idx += 1
+    
+    if dataset_AN:
+        for data in data_test:
+            data.y = 1 if data.y == 0 else 0
+    
+    max_nodes = max([dataset[i].num_nodes for i in range(len(dataset))])
+    dataloader = DataLoader(data_train, batch_size, shuffle=True)
+    dataloader_test = DataLoader(data_test, batch_size, shuffle=True)
+    meta = {'num_feat':dataset_num_features, 'num_train':len(data_train), 'num_test':len(data_test), 'num_edge_feat':0, 'max_nodes':max_nodes, 'max_node_label':max_node_label}
+    loader_dict = {'train': dataloader, 'test': dataloader_test}
+    
     return loader_dict, meta
 
 
