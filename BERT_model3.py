@@ -60,17 +60,19 @@ def train_bert_embedding(model, train_loader, bert_optimizer, device):
         mask_indices = torch.rand(x.size(0), device=device) < 0.15  # 15% 노드 마스킹
         
         # BERT 인코딩 및 마스크 토큰 예측만 수행
-        _, _, _, z, masked_outputs = model(
+        _, _, _, z, masked_outputs, masked_outputs_ = model(
             x, edge_index, batch, num_graphs, mask_indices, training=True
         )
-        
+        loss = 0
         # 마스크 예측 손실만 계산
-        # mask_loss = F.mse_loss(masked_outputs, x[mask_indices])
-        mask_loss = F.cross_entropy(masked_outputs, node_label[mask_indices])
+        mask_loss = F.mse_loss(masked_outputs, x[mask_indices])
+        mask_loss_ = F.cross_entropy(masked_outputs_, node_label[mask_indices])
         
-        mask_loss.backward()
+        loss += mask_loss + mask_loss_
+        
+        loss.backward()
         bert_optimizer.step()
-        total_loss += mask_loss.item()
+        total_loss += loss.item()
         num_sample += num_graphs
     
     return total_loss / len(train_loader), num_sample, z.detach().cpu()
@@ -303,16 +305,12 @@ class BertEncoder(nn.Module):
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers)
         
+        # 마스크 토큰용 임베딩 추가
+        self.mask_token = nn.Parameter(torch.randn(1, hidden_dims[-1]))
+        
         # 마스크 토큰 예측을 위한 분류기
-        self.classifier = nn.Sequential(
-            nn.Linear(hidden_dims[-1], hidden_dims[-1]),
-            nn.ReLU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(hidden_dims[-1], hidden_dims[-1] // 2),
-            nn.ReLU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(hidden_dims[-1] // 2, num_node_classes)
-        )  # 노드 라벨 수
+        self.predicter = nn.Linear(hidden_dims[-1], num_features)  # 원래 feature space로 projection
+        self.classifier = nn.Linear(num_features, num_node_classes)  # 노드 라벨 수
         
         self.dropout = nn.Dropout(dropout_rate)
         self.max_nodes = max_nodes
@@ -325,6 +323,7 @@ class BertEncoder(nn.Module):
         batch_size = batch.max().item() + 1
         node_embeddings = []
         outputs = []
+        outputs_ = []
         
         start_idx = 0
         for i in range(batch_size):
@@ -339,8 +338,15 @@ class BertEncoder(nn.Module):
             pos_encoding = self.positional_encoding(graph_edge_index, num_nodes)
             graph_h = graph_h + pos_encoding
             
+            if training and mask_indices is not None:
+                # 현재 그래프의 마스크 인덱스
+                graph_mask_indices = mask_indices[mask]
+                # 마스크된 위치에 마스크 토큰 삽입
+                # mask_token = mask_token.to(device)
+                graph_h[graph_mask_indices] = mask_token
+               
             # 패딩
-            padded_h = F.pad(graph_h, (0, 0, 0, max_nodes - num_nodes), "constant", 0)
+            padded_h = F.pad(graph_h, (0, 0, 0, self.max_nodes - num_nodes), "constant", 0)
             padding_mask = torch.zeros(1, self.max_nodes, dtype=torch.bool, device=x.device)  # [1, max_nodes]
             padding_mask[0, num_nodes:] = True
           
@@ -350,20 +356,29 @@ class BertEncoder(nn.Module):
             # transformed_h = padded_h.unsqueeze(1)
             # encoded = transformer(transformed_h, src_key_padding_mask=padding_mask)
             # encoded = encoded.transpose(0, 1).squeeze(1)[:num_nodes]  # 패딩 제거
-
-            # 트랜스포머 처리
-            encoded = self.transformer(padded_h.unsqueeze(1), src_key_padding_mask=padding_mask)
+            
+            # # 트랜스포머 처리
+            # encoded = self.transformer(padded_h.unsqueeze(1), src_key_padding_mask=padding_mask)
+            # encoded = encoded.squeeze(1)[:num_nodes]  # 패딩 제거
+            
+            # node_embeddings.append(encoded)
+            
+            # 트랜스포머 처리 (마스크된 상태로)
+            # print(padded_h.shape)
+            # print(padded_h.unsqueeze(1).shape)
+            # print(padding_mask.shape)
+            transformed_h = padded_h.unsqueeze(1)
+            encoded = self.transformer(transformed_h, src_key_padding_mask=padding_mask)
             encoded = encoded.squeeze(1)[:num_nodes]  # 패딩 제거
-            
+           
             node_embeddings.append(encoded)
-            
-            # 학습 중이고 마스크 인덱스가 주어진 경우
+           
+            # 학습 중이면 마스크된 노드의 원본 특성 예측
             if training and mask_indices is not None:
-                # mask도 동일한 device로 이동
-                mask = mask.to(x.device)
-                graph_mask_indices = mask_indices[mask]
-                masked_output = self.classifier(encoded[graph_mask_indices])
+                masked_output = self.predicter(encoded[graph_mask_indices])
                 outputs.append(masked_output)
+                masked_output_ = self.classifier(encoded[graph_mask_indices])
+                outputs_.append(masked_output)
             
             start_idx += num_nodes
         
@@ -372,7 +387,8 @@ class BertEncoder(nn.Module):
         
         if training and mask_indices is not None:
             outputs = torch.cat(outputs, dim=0)
-            return node_embeddings, outputs
+            outputs_ = torch.cat(outputs_, dim=0)
+            return node_embeddings, outputs, outputs_
         
         return node_embeddings
     
@@ -488,14 +504,10 @@ class TransformerEncoder(nn.Module):
     def __init__(self, d_model, nhead, num_layers, dim_feedforward, max_nodes, dropout=0.1):
         super(TransformerEncoder, self).__init__()
         self.positional_encoding = GraphBertPositionalEncoding(d_model, max_nodes)
-        encoder_layer_n = nn.TransformerEncoderLayer(
+        encoder_layer = nn.TransformerEncoderLayer(
             d_model, nhead, dim_feedforward, dropout, activation='relu', batch_first=True
         )
-        encoder_layer_g = nn.TransformerEncoderLayer(
-            d_model, nhead, dim_feedforward, dropout, activation='relu', batch_first=True
-        )
-        self.transformer_encoder_n = nn.TransformerEncoder(encoder_layer_n, num_layers)
-        self.transformer_encoder_g = nn.TransformerEncoder(encoder_layer_g, num_layers)
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer_n, num_layers)
         self.d_model = d_model
 
     def forward(self, src, edge_index_list, src_key_padding_mask):
@@ -535,12 +547,10 @@ class TransformerEncoder(nn.Module):
         src_ = src + pos_encoding_batch
         
         src_ = src_.transpose(0, 1)  # [seq_len, batch_size, hidden_dim]
-        src_key_padding_mask_ = src_key_padding_mask.transpose(0, 1)
-        output_ = self.transformer_encoder_g(src_, src_key_padding_mask=src_key_padding_mask_)
+        # src_key_padding_mask_ = src_key_padding_mask.transpose(0, 1)
+        output_ = self.transformer_encoder(src_, src_key_padding_mask=src_key_padding_mask)
         output = output_.transpose(0, 1)  # [batch_size, seq_len, hidden_dim]
-        
-        output = self.transformer_encoder_n(output, src_key_padding_mask=src_key_padding_mask)
-            
+
         return output
 
 
@@ -600,7 +610,7 @@ class GRAPH_AUTOENCODER(nn.Module):
     def forward(self, x, edge_index, batch, num_graphs, mask_indices=None, training=True):
         # BERT 인코딩
         if training and mask_indices is not None:
-            z, masked_outputs = self.encoder(
+            z, masked_outputs, masked_outputs_ = self.encoder(
                 x, edge_index, batch, mask_indices, training=True
             )
         else:
@@ -668,7 +678,7 @@ class GRAPH_AUTOENCODER(nn.Module):
             idx += num_nodes
         
         if training and mask_indices is not None:
-            return x_recon, adj_recon_list, cls_output, z, masked_outputs
+            return x_recon, adj_recon_list, cls_output, z, masked_outputs, masked_outputs_
         
         return x_recon, adj_recon_list, cls_output, z
 
@@ -715,6 +725,9 @@ def run(dataset_name, random_seed, dataset_AN, split=None, device=device):
     max_nodes = meta['max_nodes']
     max_node_label = meta['max_node_label']
     
+    # BERT 모델 저장 경로
+    bert_save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/BERT_model/pretrained_bert_{dataset_name}_seed{random_seed}_epochs{epochs}_try1.pth'
+    
     model = GRAPH_AUTOENCODER(
         num_features=num_features, 
         hidden_dims=hidden_dims, 
@@ -733,19 +746,31 @@ def run(dataset_name, random_seed, dataset_AN, split=None, device=device):
     train_cls_outputs = []
     
     # 1단계: BERT 임베딩 학습
-    print("Stage 1: Training BERT embeddings...")
-    bert_optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    bert_scheduler = ReduceLROnPlateau(bert_optimizer, mode='min', factor=factor, patience=patience)
+    if os.path.exists(bert_save_path):
+        print("Loading pretrained BERT...")
+        # BERT 인코더의 가중치만 로드
+        model.encoder.load_state_dict(torch.load(bert_save_path))
+    else:
+        print("Training BERT from scratch...")
+        # 1단계: BERT 임베딩 학습
+        print("Stage 1: Training BERT embeddings...")
+
+        bert_optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+        bert_scheduler = ReduceLROnPlateau(bert_optimizer, mode='min', factor=factor, patience=patience)
     
-    for epoch in range(1, epochs+1):
-        train_loss, num_sample, node_embeddings = train_bert_embedding(
-            model, train_loader, bert_optimizer, device
-        )
-        bert_scheduler.step(train_loss)
+        for epoch in range(1, epochs+1):
+            train_loss, num_sample, node_embeddings = train_bert_embedding(
+                model, train_loader, bert_optimizer, device
+            )
+            bert_scheduler.step(train_loss)
+            
+            if epoch % log_interval == 0:
+                print(f'BERT Training Epoch {epoch}: Loss = {train_loss:.4f}')
+                
+        # 학습된 BERT 저장
+        print("Saving pretrained BERT...")
+        torch.save(model.encoder.state_dict(), bert_save_path)
         
-        if epoch % log_interval == 0:
-            print(f'BERT Training Epoch {epoch}: Loss = {train_loss:.4f}')
-    
     # 2단계: 재구성 학습
     print("\nStage 2: Training reconstruction...")
     recon_optimizer = torch.optim.Adam(

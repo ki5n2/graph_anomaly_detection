@@ -301,8 +301,20 @@ class BertEncoder(nn.Module):
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers)
         
+        # 마스크 토큰용 임베딩 추가
+        self.mask_token = nn.Parameter(torch.randn(1, hidden_dims[-1]))
+        
         # 마스크 토큰 예측을 위한 분류기
         self.classifier = nn.Linear(hidden_dims[-1], num_features)  # 원래 feature space로 projection
+        # self.classifier = nn.Sequential(
+        #    nn.Linear(hidden_dims[-1], hidden_dims[-1]),
+        #    nn.ReLU(),
+        #    nn.Dropout(dropout_rate),
+        #    nn.Linear(hidden_dims[-1], hidden_dims[-1] // 2),
+        #    nn.ReLU(),
+        #    nn.Dropout(dropout_rate),
+        #    nn.Linear(hidden_dims[-1] // 2, num_features)
+        #    )
         
         self.dropout = nn.Dropout(dropout_rate)
         self.max_nodes = max_nodes
@@ -329,8 +341,15 @@ class BertEncoder(nn.Module):
             pos_encoding = self.positional_encoding(graph_edge_index, num_nodes)
             graph_h = graph_h + pos_encoding
             
+            if training and mask_indices is not None:
+                # 현재 그래프의 마스크 인덱스
+                graph_mask_indices = mask_indices[mask]
+                # 마스크된 위치에 마스크 토큰 삽입
+                # mask_token = mask_token.to(device)
+                graph_h[graph_mask_indices] = mask_token
+               
             # 패딩
-            padded_h = F.pad(graph_h, (0, 0, 0, max_nodes - num_nodes), "constant", 0)
+            padded_h = F.pad(graph_h, (0, 0, 0, self.max_nodes - num_nodes), "constant", 0)
             padding_mask = torch.zeros(1, self.max_nodes, dtype=torch.bool, device=x.device)  # [1, max_nodes]
             padding_mask[0, num_nodes:] = True
           
@@ -340,18 +359,25 @@ class BertEncoder(nn.Module):
             # transformed_h = padded_h.unsqueeze(1)
             # encoded = transformer(transformed_h, src_key_padding_mask=padding_mask)
             # encoded = encoded.transpose(0, 1).squeeze(1)[:num_nodes]  # 패딩 제거
-
-            # 트랜스포머 처리
-            encoded = self.transformer(padded_h.unsqueeze(1), src_key_padding_mask=padding_mask)
+            
+            # # 트랜스포머 처리
+            # encoded = self.transformer(padded_h.unsqueeze(1), src_key_padding_mask=padding_mask)
+            # encoded = encoded.squeeze(1)[:num_nodes]  # 패딩 제거
+            
+            # node_embeddings.append(encoded)
+            
+            # 트랜스포머 처리 (마스크된 상태로)
+            # print(padded_h.shape)
+            # print(padded_h.unsqueeze(1).shape)
+            # print(padding_mask.shape)
+            transformed_h = padded_h.unsqueeze(1)
+            encoded = self.transformer(transformed_h, src_key_padding_mask=padding_mask)
             encoded = encoded.squeeze(1)[:num_nodes]  # 패딩 제거
-            
+           
             node_embeddings.append(encoded)
-            
-            # 학습 중이고 마스크 인덱스가 주어진 경우
+           
+            # 학습 중이면 마스크된 노드의 원본 특성 예측
             if training and mask_indices is not None:
-                # mask도 동일한 device로 이동
-                mask = mask.to(x.device)
-                graph_mask_indices = mask_indices[mask]
                 masked_output = self.classifier(encoded[graph_mask_indices])
                 outputs.append(masked_output)
             
@@ -525,9 +551,7 @@ class TransformerEncoder(nn.Module):
         # src_key_padding_mask_ = src_key_padding_mask.transpose(0, 1)
         output_ = self.transformer_encoder(src_, src_key_padding_mask=src_key_padding_mask)
         output = output_.transpose(0, 1)  # [batch_size, seq_len, hidden_dim]
-        
-        # output = self.transformer_encoder_n(output, src_key_padding_mask=src_key_padding_mask)
-            
+                    
         return output
 
 
@@ -701,7 +725,7 @@ def run(dataset_name, random_seed, dataset_AN, split=None, device=device):
     max_nodes = meta['max_nodes']
 
     # BERT 모델 저장 경로
-    bert_save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/BERT_model/pretrained_bert_{dataset_name}_seed{random_seed}_epochs{epochs}_try0.pth'
+    bert_save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/BERT_model/pretrained_bert_{dataset_name}_seed{random_seed}_epochs{epochs}_try1.pth'
     
     model = GRAPH_AUTOENCODER(
         num_features=num_features, 
