@@ -346,7 +346,7 @@ def get_data_loaders_TU(dataset_name, batch_size, test_batch_size, split, datase
         num_unique_node_labels = max(node_labels) + 1
     except IOError:
         print('No node labels')
-    max_node_label = max(node_labels)
+    # max_node_label = max(node_labels)
     
     dataset = []
     node_idx = 0
@@ -354,7 +354,7 @@ def get_data_loaders_TU(dataset_name, batch_size, test_batch_size, split, datase
         old_data = dataset_[i]
         num_nodes = old_data.num_nodes
         new_x = torch.tensor(node_attrs[node_idx:node_idx+num_nodes], dtype=torch.float)
-        node_label_graph =  torch.tensor(node_labels[node_idx:node_idx+num_nodes], dtype=torch.float)
+        node_label_graph = torch.tensor(node_labels[node_idx:node_idx+num_nodes], dtype=torch.float)   
         
         if new_x.shape[0] == node_label_graph.shape[0]:
             print(True)
@@ -407,7 +407,7 @@ def get_data_loaders_TU(dataset_name, batch_size, test_batch_size, split, datase
     max_nodes = max([dataset[i].num_nodes for i in range(len(dataset))])
     dataloader = DataLoader(data_train, batch_size, shuffle=True)
     dataloader_test = DataLoader(data_test, batch_size, shuffle=True)
-    meta = {'num_feat':dataset_num_features, 'num_train':len(data_train), 'num_test':len(data_test), 'num_edge_feat':0, 'max_nodes':max_nodes, 'max_node_label':max_node_label}
+    meta = {'num_feat':dataset_num_features, 'num_train':len(data_train), 'num_test':len(data_test), 'num_edge_feat':0, 'max_nodes':max_nodes, 'max_node_label':num_unique_node_labels}
     loader_dict = {'train': dataloader, 'test': dataloader_test}
     
     return loader_dict, meta

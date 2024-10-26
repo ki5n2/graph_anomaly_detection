@@ -55,7 +55,8 @@ def train_bert_embedding(model, train_loader, bert_optimizer, device):
         bert_optimizer.zero_grad()
         data = data.to(device)
         x, edge_index, batch, num_graphs, node_label = data.x, data.edge_index, data.batch, data.num_graphs, data.node_label
-        
+        # node_label = torch.round(node_label).long()
+
         # 마스크 생성
         mask_indices = torch.rand(x.size(0), device=device) < 0.15  # 15% 노드 마스킹
         
@@ -63,12 +64,11 @@ def train_bert_embedding(model, train_loader, bert_optimizer, device):
         _, _, _, z, masked_outputs, masked_outputs_ = model(
             x, edge_index, batch, num_graphs, mask_indices, training=True
         )
-        loss = 0
+        
         # 마스크 예측 손실만 계산
         mask_loss = F.mse_loss(masked_outputs, x[mask_indices])
         mask_loss_ = F.cross_entropy(masked_outputs_, node_label[mask_indices])
-        
-        loss += mask_loss + mask_loss_
+        loss = mask_loss + mask_loss_
         
         loss.backward()
         bert_optimizer.step()
@@ -343,7 +343,7 @@ class BertEncoder(nn.Module):
                 graph_mask_indices = mask_indices[mask]
                 # 마스크된 위치에 마스크 토큰 삽입
                 # mask_token = mask_token.to(device)
-                graph_h[graph_mask_indices] = mask_token
+                graph_h[graph_mask_indices] = self.mask_token
                
             # 패딩
             padded_h = F.pad(graph_h, (0, 0, 0, self.max_nodes - num_nodes), "constant", 0)
@@ -367,6 +367,7 @@ class BertEncoder(nn.Module):
             # print(padded_h.shape)
             # print(padded_h.unsqueeze(1).shape)
             # print(padding_mask.shape)
+            
             transformed_h = padded_h.unsqueeze(1)
             encoded = self.transformer(transformed_h, src_key_padding_mask=padding_mask)
             encoded = encoded.squeeze(1)[:num_nodes]  # 패딩 제거
@@ -377,8 +378,8 @@ class BertEncoder(nn.Module):
             if training and mask_indices is not None:
                 masked_output = self.predicter(encoded[graph_mask_indices])
                 outputs.append(masked_output)
-                masked_output_ = self.classifier(encoded[graph_mask_indices])
-                outputs_.append(masked_output)
+                masked_output_ = self.classifier(masked_output)
+                outputs_.append(masked_output_)
             
             start_idx += num_nodes
         
@@ -505,9 +506,9 @@ class TransformerEncoder(nn.Module):
         super(TransformerEncoder, self).__init__()
         self.positional_encoding = GraphBertPositionalEncoding(d_model, max_nodes)
         encoder_layer = nn.TransformerEncoderLayer(
-            d_model, nhead, dim_feedforward, dropout, activation='relu', batch_first=True
+            d_model, nhead, dim_feedforward, dropout, activation='relu'
         )
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layer_n, num_layers)
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers)
         self.d_model = d_model
 
     def forward(self, src, edge_index_list, src_key_padding_mask):
@@ -726,7 +727,7 @@ def run(dataset_name, random_seed, dataset_AN, split=None, device=device):
     max_node_label = meta['max_node_label']
     
     # BERT 모델 저장 경로
-    bert_save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/BERT_model/pretrained_bert_{dataset_name}_seed{random_seed}_epochs{epochs}_try1.pth'
+    bert_save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/BERT_model/pretrained_bert_{dataset_name}_fold0_seed{random_seed}_epochs{epochs}_try0.pth'
     
     model = GRAPH_AUTOENCODER(
         num_features=num_features, 
@@ -758,7 +759,7 @@ def run(dataset_name, random_seed, dataset_AN, split=None, device=device):
         bert_optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
         bert_scheduler = ReduceLROnPlateau(bert_optimizer, mode='min', factor=factor, patience=patience)
     
-        for epoch in range(1, epochs+1):
+        for epoch in range(1, 5+1):
             train_loss, num_sample, node_embeddings = train_bert_embedding(
                 model, train_loader, bert_optimizer, device
             )
