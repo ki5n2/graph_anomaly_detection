@@ -55,20 +55,20 @@ def train_bert_embedding(model, train_loader, bert_optimizer, device):
         bert_optimizer.zero_grad()
         data = data.to(device)
         x, edge_index, batch, num_graphs, node_label = data.x, data.edge_index, data.batch, data.num_graphs, data.node_label
-        # node_label = torch.round(node_label).long()
+        node_label = torch.round(node_label).long()
 
         # 마스크 생성
         mask_indices = torch.rand(x.size(0), device=device) < 0.15  # 15% 노드 마스킹
         
         # BERT 인코딩 및 마스크 토큰 예측만 수행
-        _, _, _, z, masked_outputs, masked_outputs_ = model(
+        _, _, _, z, masked_outputs_ = model(
             x, edge_index, batch, num_graphs, mask_indices, training=True
         )
         
         # 마스크 예측 손실만 계산
-        mask_loss = F.mse_loss(masked_outputs, x[mask_indices])
+        # mask_loss = F.mse_loss(masked_outputs, x[mask_indices])
         mask_loss_ = F.cross_entropy(masked_outputs_, node_label[mask_indices])
-        loss = mask_loss + mask_loss_
+        loss = mask_loss_
         
         loss.backward()
         bert_optimizer.step()
@@ -214,8 +214,9 @@ parser.add_argument("--dataset-name", type=str, default='COX2')
 parser.add_argument("--data-root", type=str, default='./dataset')
 parser.add_argument("--assets-root", type=str, default="./assets")
 
-parser.add_argument("--n-head", type=int, default=8)
-parser.add_argument("--n-layer", type=int, default=6)
+parser.add_argument("--n-head", type=int, default=12)
+parser.add_argument("--n-layer", type=int, default=12)
+parser.add_argument("--BERT-epochs", type=int, default=300)
 parser.add_argument("--epochs", type=int, default=100)
 parser.add_argument("--patience", type=int, default=5)
 parser.add_argument("--n-cluster", type=int, default=3)
@@ -226,7 +227,7 @@ parser.add_argument("--batch-size", type=int, default=300)
 parser.add_argument("--log-interval", type=int, default=5)
 parser.add_argument("--n-test-anomaly", type=int, default=400)
 parser.add_argument("--test-batch-size", type=int, default=128)
-parser.add_argument("--hidden-dims", nargs='+', type=int, default=[256, 128])
+parser.add_argument("--hidden-dims", nargs='+', type=int, default=[256, 768])
 
 parser.add_argument("--factor", type=float, default=0.5)
 parser.add_argument("--test-size", type=float, default=0.25)
@@ -252,6 +253,7 @@ data_root: str = args.data_root
 assets_root: str = args.assets_root
 dataset_name: str = args.dataset_name
 
+BERT_epochs: int = args.BERT_epochs
 epochs: int = args.epochs
 n_head: int = args.n_head
 n_layer: int = args.n_layer
@@ -301,7 +303,7 @@ class BertEncoder(nn.Module):
         
         # BERT 스타일 트랜스포머 레이어
         encoder_layer = nn.TransformerEncoderLayer(
-            hidden_dims[-1], nhead, hidden_dims[-1] * 4, dropout_rate, activation='relu'
+            hidden_dims[-1], nhead, 2048, dropout_rate, activation='relu'
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers)
         
@@ -309,8 +311,8 @@ class BertEncoder(nn.Module):
         self.mask_token = nn.Parameter(torch.randn(1, hidden_dims[-1]))
         
         # 마스크 토큰 예측을 위한 분류기
-        self.predicter = nn.Linear(hidden_dims[-1], num_features)  # 원래 feature space로 projection
-        self.classifier = nn.Linear(num_features, num_node_classes)  # 노드 라벨 수
+        # self.predicter = nn.Linear(hidden_dims[-1], num_features)  # 원래 feature space로 projection
+        self.classifier = nn.Linear(hidden_dims[-1], num_node_classes)  # 노드 라벨 수
         
         self.dropout = nn.Dropout(dropout_rate)
         self.max_nodes = max_nodes
@@ -376,9 +378,9 @@ class BertEncoder(nn.Module):
            
             # 학습 중이면 마스크된 노드의 원본 특성 예측
             if training and mask_indices is not None:
-                masked_output = self.predicter(encoded[graph_mask_indices])
-                outputs.append(masked_output)
-                masked_output_ = self.classifier(masked_output)
+                # masked_output = self.predicter(encoded[graph_mask_indices])
+                # outputs.append(masked_output)
+                masked_output_ = self.classifier(encoded[graph_mask_indices])
                 outputs_.append(masked_output_)
             
             start_idx += num_nodes
@@ -387,9 +389,9 @@ class BertEncoder(nn.Module):
         node_embeddings = torch.cat(node_embeddings, dim=0)
         
         if training and mask_indices is not None:
-            outputs = torch.cat(outputs, dim=0)
+            # outputs = torch.cat(outputs, dim=0)
             outputs_ = torch.cat(outputs_, dim=0)
-            return node_embeddings, outputs, outputs_
+            return node_embeddings, outputs_
         
         return node_embeddings
     
@@ -588,7 +590,7 @@ class GRAPH_AUTOENCODER(nn.Module):
             d_model=hidden_dims[-1],
             nhead=8,
             num_layers=2,
-            dim_feedforward=hidden_dims[-1] * 4,
+            dim_feedforward=2048,
             max_nodes=max_nodes,
             dropout=dropout_rate
         )
@@ -611,7 +613,7 @@ class GRAPH_AUTOENCODER(nn.Module):
     def forward(self, x, edge_index, batch, num_graphs, mask_indices=None, training=True):
         # BERT 인코딩
         if training and mask_indices is not None:
-            z, masked_outputs, masked_outputs_ = self.encoder(
+            z, masked_outputs_ = self.encoder(
                 x, edge_index, batch, mask_indices, training=True
             )
         else:
@@ -679,7 +681,7 @@ class GRAPH_AUTOENCODER(nn.Module):
             idx += num_nodes
         
         if training and mask_indices is not None:
-            return x_recon, adj_recon_list, cls_output, z, masked_outputs, masked_outputs_
+            return x_recon, adj_recon_list, cls_output, z, masked_outputs_
         
         return x_recon, adj_recon_list, cls_output, z
 
@@ -727,7 +729,7 @@ def run(dataset_name, random_seed, dataset_AN, split=None, device=device):
     max_node_label = meta['max_node_label']
     
     # BERT 모델 저장 경로
-    bert_save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/BERT_model/pretrained_bert_{dataset_name}_fold0_seed{random_seed}_epochs{epochs}_try0.pth'
+    bert_save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/BERT_model/pretrained_bert_{dataset_name}_fold0_seed{random_seed}_BERT_epochs{BERT_epochs}_try0.pth'
     
     model = GRAPH_AUTOENCODER(
         num_features=num_features, 
@@ -759,7 +761,7 @@ def run(dataset_name, random_seed, dataset_AN, split=None, device=device):
         bert_optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
         bert_scheduler = ReduceLROnPlateau(bert_optimizer, mode='min', factor=factor, patience=patience)
     
-        for epoch in range(1, 5+1):
+        for epoch in range(1, 300+1):
             train_loss, num_sample, node_embeddings = train_bert_embedding(
                 model, train_loader, bert_optimizer, device
             )
