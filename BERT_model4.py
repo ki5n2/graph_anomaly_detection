@@ -61,14 +61,14 @@ def train_bert_embedding(model, train_loader, bert_optimizer, device):
         mask_indices = torch.rand(x.size(0), device=device) < 0.15  # 15% 노드 마스킹
         
         # BERT 인코딩 및 마스크 토큰 예측만 수행
-        _, _, _, z, masked_outputs_ = model(
+        _, z, masked_outputs, masked_outputs_ = model(
             x, edge_index, batch, num_graphs, mask_indices, training=True
         )
         
         # 마스크 예측 손실만 계산
-        # mask_loss = F.mse_loss(masked_outputs, x[mask_indices])
+        mask_loss = F.mse_loss(masked_outputs, x[mask_indices])
         mask_loss_ = F.cross_entropy(masked_outputs_, node_label[mask_indices])
-        loss = mask_loss_
+        loss = mask_loss + mask_loss_
         
         loss.backward()
         bert_optimizer.step()
@@ -84,39 +84,28 @@ def train(model, train_loader, recon_optimizer, max_nodes, device):
     total_loss = 0
     num_sample = 0
     
-    # # BERT 인코더의 파라미터는 고정
-    # model.encoder.eval()
-    # for param in model.encoder.parameters():
-    #     param.requires_grad = True
+    # BERT 인코더의 파라미터는 고정
+    model.encoder.eval()
+    for param in model.encoder.parameters():
+        param.requires_grad = False
         
     for data in train_loader:
         recon_optimizer.zero_grad()
         data = data.to(device)
         x, edge_index, batch, num_graphs, node_label = data.x, data.edge_index, data.batch, data.num_graphs, data.node_label
         
-        x_recon, adj_recon_list, train_cls_outputs, z_ = model(x, edge_index, batch, num_graphs)
+        train_cls_outputs, z_ = model(x, edge_index, batch, num_graphs)
 
-        adj = adj_original(edge_index, batch, max_nodes)
         loss = 0
-        start_node = 0
-        for i in range(num_graphs):
-            num_nodes = (batch == i).sum().item()
-            end_node = start_node + num_nodes
-
-            adj_loss = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2 / num_nodes
-            adj_loss = adj_loss * adj_theta
-            
-            loss += adj_loss
-            
-            start_node = end_node
+        
+        kmeans, cluster_centers = perform_clustering(train_cls_outputs, random_seed, n_clusters=n_cluster)
+        
+        clu_loss = cluster_center_compactness_loss(cluster_centers)
+        
+        loss += clu_loss
         
         print(f'train_adj_loss: {loss}')
         
-        node_loss = (torch.norm(x_recon - x, p='fro')**2) / max_nodes
-        node_loss = node_loss * node_theta
-        print(f'train_node loss: {node_loss}')
-        
-        loss += node_loss
         num_sample += num_graphs
 
         loss.backward()
@@ -143,9 +132,7 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
             data = data.to(device)
             x, edge_index, batch, num_graphs, node_label = data.x, data.edge_index, data.batch, data.num_graphs, data.node_label
 
-            adj = adj_original(edge_index, batch, max_nodes)
-
-            x_recon, adj_recon_list, e_cls_output, z_ = model(x, edge_index, batch, num_graphs)
+            e_cls_output, z_ = model(x, edge_index, batch, num_graphs)
 
             recon_errors = []
             start_node = 0
@@ -153,22 +140,16 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
                 num_nodes = (batch == i).sum().item()
                 end_node = start_node + num_nodes
 
-                node_loss = (torch.norm(x_recon[start_node:end_node] - x[start_node:end_node], p='fro')**2) / num_nodes
-                
-                adj_loss = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2 / num_nodes
-                
                 # cls_vec = e_cls_output[i].cpu().numpy()  # [hidden_dim]
                 cls_vec = e_cls_output[i].detach().cpu().numpy()  # [hidden_dim]
                 distances = cdist([cls_vec], cluster_centers, metric='euclidean')  # [1, n_clusters]
                 min_distance = distances.min()
 
                 # recon_error = node_loss.item() * 0.1 + adj_loss.item() * 1 + min_distance * 0.5
-                recon_error = node_loss.item() * alpha + adj_loss.item() * beta + min_distance.item() * gamma
+                recon_error = min_distance.item()
                 recon_errors.append(recon_error)
                 
-                print(f'test_node_loss: {node_loss.item() * alpha }')
-                print(f'test_adj_loss: {adj_loss.item() * beta }')
-                print(f'test_min_distance: {min_distance * gamma }')
+                print(f'test_min_distance: {min_distance }')
 
                 if data.y[i].item() == 0:
                     total_loss_ += recon_error
@@ -206,6 +187,29 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
     return auroc, auprc, precision, recall, f1, total_loss_mean / len(test_loader), total_loss_anomaly_mean / len(test_loader)
 
 
+def cluster_center_compactness_loss(cluster_centers):
+    """
+    cluster_centers : tensor, shape (num_clusters, feature_dim)
+        - num_clusters: 클러스터의 개수 (e.g., 100)
+        - feature_dim: 각 클러스터 중심 벡터의 차원
+    
+    Returns:
+    --------
+    loss : tensor
+        클러스터 중심들이 가까워지도록 하는 손실 값
+    """
+    num_clusters = cluster_centers.size(0)
+    # 클러스터 중심 쌍의 유클리드 거리 계산
+    distances = torch.cdist(cluster_centers, cluster_centers, p=2)  # shape (num_clusters, num_clusters)
+    
+    # 자기 자신과의 거리는 제외하고 모든 거리를 합산
+    mask = torch.ones_like(distances, dtype=torch.bool)
+    mask.fill_diagonal_(0)  # 대각선 원소를 0으로 설정하여 자기 자신과의 거리 제외
+    compactness_loss = distances[mask].mean()  # 평균을 통해 최종 손실 산출
+    
+    return compactness_loss
+
+
 #%%
 '''ARGPARSER'''
 parser = argparse.ArgumentParser()
@@ -219,7 +223,7 @@ parser.add_argument("--n-layer", type=int, default=12)
 parser.add_argument("--BERT-epochs", type=int, default=300)
 parser.add_argument("--epochs", type=int, default=200)
 parser.add_argument("--patience", type=int, default=5)
-parser.add_argument("--n-cluster", type=int, default=3)
+parser.add_argument("--n-cluster", type=int, default=5)
 parser.add_argument("--step-size", type=int, default=20)
 parser.add_argument("--n-cross-val", type=int, default=5)
 parser.add_argument("--random-seed", type=int, default=0)
@@ -236,8 +240,8 @@ parser.add_argument("--weight-decay", type=float, default=0.0001)
 parser.add_argument("--learning-rate", type=float, default=0.001)
 
 parser.add_argument("--alpha", type=float, default=0.3)
-parser.add_argument("--beta", type=float, default=0.00)
-parser.add_argument("--gamma", type=float, default=0.1)
+parser.add_argument("--beta", type=float, default=0.05)
+parser.add_argument("--gamma", type=float, default=1.0)
 parser.add_argument("--node-theta", type=float, default=0.03)
 parser.add_argument("--adj-theta", type=float, default=0.01)
 
@@ -311,8 +315,9 @@ class BertEncoder(nn.Module):
         self.mask_token = nn.Parameter(torch.randn(1, hidden_dims[-1]))
         
         # 마스크 토큰 예측을 위한 분류기
-        # self.predicter = nn.Linear(hidden_dims[-1], num_features)  # 원래 feature space로 projection
-        self.classifier = nn.Linear(hidden_dims[-1], num_node_classes)  # 노드 라벨 수
+        self.predicter = nn.Linear(hidden_dims[-1], num_features)  # 원래 feature space로 projection
+        self.classifier = nn.Linear(num_features, num_node_classes)  # 노드 라벨 수
+        # self.classifier = nn.Linear(hidden_dims[-1], num_node_classes)  # 노드 라벨 수
         
         self.dropout = nn.Dropout(dropout_rate)
         self.max_nodes = max_nodes
@@ -351,24 +356,6 @@ class BertEncoder(nn.Module):
             padded_h = F.pad(graph_h, (0, 0, 0, self.max_nodes - num_nodes), "constant", 0)
             padding_mask = torch.zeros(1, self.max_nodes, dtype=torch.bool, device=x.device)  # [1, max_nodes]
             padding_mask[0, num_nodes:] = True
-          
-            # padding_mask = torch.zeros(max_nodes, dtype=torch.bool, device=x.device)
-            # padding_mask[num_nodes:] = True
-            
-            # transformed_h = padded_h.unsqueeze(1)
-            # encoded = transformer(transformed_h, src_key_padding_mask=padding_mask)
-            # encoded = encoded.transpose(0, 1).squeeze(1)[:num_nodes]  # 패딩 제거
-            
-            # # 트랜스포머 처리
-            # encoded = self.transformer(padded_h.unsqueeze(1), src_key_padding_mask=padding_mask)
-            # encoded = encoded.squeeze(1)[:num_nodes]  # 패딩 제거
-            
-            # node_embeddings.append(encoded)
-            
-            # 트랜스포머 처리 (마스크된 상태로)
-            # print(padded_h.shape)
-            # print(padded_h.unsqueeze(1).shape)
-            # print(padding_mask.shape)
             
             transformed_h = padded_h.unsqueeze(1)
             encoded = self.transformer(transformed_h, src_key_padding_mask=padding_mask)
@@ -378,9 +365,9 @@ class BertEncoder(nn.Module):
            
             # 학습 중이면 마스크된 노드의 원본 특성 예측
             if training and mask_indices is not None:
-                # masked_output = self.predicter(encoded[graph_mask_indices])
-                # outputs.append(masked_output)
-                masked_output_ = self.classifier(encoded[graph_mask_indices])
+                masked_output = self.predicter(encoded[graph_mask_indices])
+                outputs.append(masked_output)
+                masked_output_ = self.classifier(masked_output)
                 outputs_.append(masked_output_)
             
             start_idx += num_nodes
@@ -389,53 +376,11 @@ class BertEncoder(nn.Module):
         node_embeddings = torch.cat(node_embeddings, dim=0)
         
         if training and mask_indices is not None:
-            # outputs = torch.cat(outputs, dim=0)
+            outputs = torch.cat(outputs, dim=0)
             outputs_ = torch.cat(outputs_, dim=0)
-            return node_embeddings, outputs_
+            return node_embeddings, outputs, outputs_
         
         return node_embeddings
-    
-
-#%%
-class FeatureDecoder(nn.Module):
-    def __init__(self, embed_dim, num_features, dropout_rate=0.1):
-        super(FeatureDecoder, self).__init__()
-        self.fc1 = nn.Linear(embed_dim, embed_dim//2)
-        self.fc2 = nn.Linear(embed_dim//2, num_features)
-        self.dropout = nn.Dropout(dropout_rate)
-        self.leaky_relu = nn.LeakyReLU(0.1)
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        nn.init.xavier_uniform_(self.fc1.weight)
-        nn.init.zeros_(self.fc1.bias)
-        nn.init.xavier_uniform_(self.fc2.weight)
-        nn.init.zeros_(self.fc2.bias)
-
-    def forward(self, z):
-        z = self.leaky_relu(self.fc1(z))
-        z = self.dropout(z)
-        z = self.fc2(z)
-        return z
-    
-
-class BilinearEdgeDecoder(nn.Module):
-    def __init__(self, max_nodes):
-        super(BilinearEdgeDecoder, self).__init__()
-        self.max_nodes = max_nodes
-        self.sigmoid = nn.Sigmoid()
-        
-    def forward(self, z):
-        actual_nodes = z.size(0)
-        
-        adj = torch.mm(z, z.t())
-        adj = self.sigmoid(adj)
-        adj = adj * (1 - torch.eye(actual_nodes, device=z.device))
-        
-        padded_adj = torch.zeros(self.max_nodes, self.max_nodes, device=z.device)
-        padded_adj[:actual_nodes, :actual_nodes] = adj
-        
-        return padded_adj
         
 
 #%%
@@ -572,10 +517,10 @@ def perform_clustering(train_cls_outputs, random_seed, n_clusters):
 
 
 #%%
-# GRAPH_AUTOENCODER 클래스 수정
-class GRAPH_AUTOENCODER(nn.Module):
+# GRAPH_DETECT 클래스 수정
+class GRAPH_DETECT(nn.Module):
     def __init__(self, num_features, hidden_dims, max_nodes, nhead, num_layers, num_node_labels, dropout_rate=0.1):
-        super(GRAPH_AUTOENCODER, self).__init__()
+        super(GRAPH_DETECT, self).__init__()
         # BERT 인코더로 변경
         self.encoder = BertEncoder(
             num_features=num_features,
@@ -590,7 +535,7 @@ class GRAPH_AUTOENCODER(nn.Module):
             d_model=hidden_dims[-1],
             nhead=8,
             num_layers=2,
-            dim_feedforward=2048,
+            dim_feedforward=hidden_dims[-1] * 4,
             max_nodes=max_nodes,
             dropout=dropout_rate
         )
@@ -599,8 +544,6 @@ class GRAPH_AUTOENCODER(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dims[-1], hidden_dims[-1])
         )
-        self.feature_decoder = FeatureDecoder(hidden_dims[-1], num_features)
-        self.edge_decoder = BilinearEdgeDecoder(max_nodes)
         self.cls_token = nn.Parameter(torch.randn(1, 1, hidden_dims[-1]))
         self.dropout = nn.Dropout(dropout_rate)
         self.max_nodes = max_nodes
@@ -613,13 +556,14 @@ class GRAPH_AUTOENCODER(nn.Module):
     def forward(self, x, edge_index, batch, num_graphs, mask_indices=None, training=True):
         # BERT 인코딩
         if training and mask_indices is not None:
-            z, masked_outputs_ = self.encoder(
+            z, masked_outputs, masked_outputs_ = self.encoder(
                 x, edge_index, batch, mask_indices, training=True
             )
         else:
             z = self.encoder(
                 x, edge_index, batch, training=False
             )
+        
         print(mask_indices)
         print(training)
         z_list = [z[batch == i] for i in range(num_graphs)] # 그래프 별 z 저장 (batch_size, num nodes, feature dim)
@@ -669,21 +613,10 @@ class GRAPH_AUTOENCODER(nn.Module):
 
         u_prime = self.u_mlp(u)
         
-        x_recon = self.feature_decoder(u_prime)
-                
-        adj_recon_list = []
-        idx = 0
-        for i in range(num_graphs):
-            num_nodes = z_list[i].size(0)
-            z_graph = u_prime[idx:idx + num_nodes]
-            adj_recon = self.edge_decoder(z_graph)
-            adj_recon_list.append(adj_recon)
-            idx += num_nodes
-        
         if training and mask_indices is not None:
-            return x_recon, adj_recon_list, cls_output, z, masked_outputs_
+            return cls_output, u_prime, masked_outputs, masked_outputs_
         
-        return x_recon, adj_recon_list, cls_output, z
+        return cls_output, u_prime
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -729,9 +662,9 @@ def run(dataset_name, random_seed, dataset_AN, split=None, device=device):
     max_node_label = meta['max_node_label']
     
     # BERT 모델 저장 경로
-    bert_save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/BERT_model/pretrained_bert_{dataset_name}_fold0_seed{random_seed}_BERT_epochs{BERT_epochs}_try0.pth'
+    bert_save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/BERT_model/pretrained_bert_{dataset_name}_fold0_seed{random_seed}_BERT_epochs{BERT_epochs}_try1.pth'
     
-    model = GRAPH_AUTOENCODER(
+    model = GRAPH_DETECT(
         num_features=num_features, 
         hidden_dims=hidden_dims, 
         max_nodes=max_nodes,
@@ -761,7 +694,7 @@ def run(dataset_name, random_seed, dataset_AN, split=None, device=device):
         bert_optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
         bert_scheduler = ReduceLROnPlateau(bert_optimizer, mode='min', factor=factor, patience=patience)
     
-        for epoch in range(1, 300+1):
+        for epoch in range(1, BERT_epochs+1):
             train_loss, num_sample, node_embeddings = train_bert_embedding(
                 model, train_loader, bert_optimizer, device
             )
@@ -776,7 +709,8 @@ def run(dataset_name, random_seed, dataset_AN, split=None, device=device):
         
     # 2단계: 재구성 학습
     print("\nStage 2: Training reconstruction...")
-    recon_optimizer = torch.optim.Adam(model.parameters(),
+    recon_optimizer = torch.optim.Adam(
+        model, 
         lr=learning_rate,
         weight_decay=weight_decay
     )
@@ -839,6 +773,5 @@ if __name__ == '__main__':
     print('[FINAL RESULTS] ' + results)
     print(f"Total execution time: {total_time:.2f} seconds")
 
-    
 
 # %%
