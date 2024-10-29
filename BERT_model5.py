@@ -69,6 +69,8 @@ def train_bert_embedding(model, train_loader, bert_optimizer, device):
         mask_loss = F.mse_loss(masked_outputs, x[mask_indices])
         mask_loss_ = F.cross_entropy(masked_outputs_, node_label[mask_indices])
         loss = mask_loss + mask_loss_
+        print(f'mask_node_feature:{mask_loss}')
+        print(f'mask_label:{mask_loss_}')
         
         loss.backward()
         bert_optimizer.step()
