@@ -836,6 +836,3 @@ if __name__ == '__main__':
     print('[FINAL RESULTS] ' + results)
     print(f"Total execution time: {total_time:.2f} seconds")
 
-    
-
-# %%

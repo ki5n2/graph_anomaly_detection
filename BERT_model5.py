@@ -227,13 +227,13 @@ parser.add_argument("--assets-root", type=str, default="./assets")
 
 parser.add_argument("--n-head", type=int, default=8)
 parser.add_argument("--n-layer", type=int, default=8)
-parser.add_argument("--BERT-epochs", type=int, default=5)
-parser.add_argument("--epochs", type=int, default=100)
+parser.add_argument("--BERT-epochs", type=int, default=100)
+parser.add_argument("--epochs", type=int, default=200)
 parser.add_argument("--patience", type=int, default=5)
 parser.add_argument("--n-cluster", type=int, default=3)
 parser.add_argument("--step-size", type=int, default=20)
 parser.add_argument("--n-cross-val", type=int, default=5)
-parser.add_argument("--random-seed", type=int, default=0)
+parser.add_argument("--random-seed", type=int, default=1)
 parser.add_argument("--batch-size", type=int, default=300)
 parser.add_argument("--log-interval", type=int, default=5)
 parser.add_argument("--n-test-anomaly", type=int, default=400)
@@ -248,7 +248,7 @@ parser.add_argument("--learning-rate", type=float, default=0.0001)
 
 parser.add_argument("--alpha", type=float, default=1.0)
 parser.add_argument("--beta", type=float, default=0.05)
-parser.add_argument("--gamma", type=float, default=0.1)
+parser.add_argument("--gamma", type=float, default=0.01)
 parser.add_argument("--node-theta", type=float, default=0.03)
 parser.add_argument("--adj-theta", type=float, default=0.01)
 
@@ -745,17 +745,18 @@ print(f'Max nodes: {max_nodes}')
 
 # %%
 '''RUN'''
-def run(dataset_name, random_seed, dataset_AN, split=None, device=device):
+def run(dataset_name, random_seed, dataset_AN, trial, device=device):
     all_results = []
     set_seed(random_seed)
-
+    split=splits[trial]
+    
     loaders, meta = get_data_loaders_TU(dataset_name, batch_size, test_batch_size, split, dataset_AN)
     num_features = meta['num_feat']
     max_nodes = meta['max_nodes']
     max_node_label = meta['max_node_label']
     
     # BERT 모델 저장 경로
-    bert_save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/BERT_model/pretrained_bert_{dataset_name}_fold0_seed{random_seed}_BERT_epochs{BERT_epochs}_try2.pth'
+    bert_save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/BERT_model/pretrained_bert_{dataset_name}_fold{trial}_seed{random_seed}_BERT_epochs{BERT_epochs}_try2.pth'
     
     model = GRAPH_AUTOENCODER(
         num_features=num_features, 
@@ -843,11 +844,11 @@ if __name__ == '__main__':
 
     start_time = time.time()  # 전체 실행 시작 시간
 
-    for trial in range(1):
+    for trial in range(n_cross_val):
         fold_start = time.time()  # 현재 폴드 시작 시간
 
         print(f"Starting fold {trial + 1}/{n_cross_val}")
-        ad_auc = run(dataset_name, random_seed, dataset_AN, split=splits[trial])
+        ad_auc = run(dataset_name, random_seed, dataset_AN, trial)
         ad_aucs.append(ad_auc)
         
         fold_end = time.time()  # 현재 폴드 종료 시간
