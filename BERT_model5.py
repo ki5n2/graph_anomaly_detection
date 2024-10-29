@@ -307,16 +307,18 @@ os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 # %%
 '''MODEL CONSTRUCTION'''
 class ResidualBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, dropout_rate=0.1):
+    def __init__(self, in_channels, out_channels, dropout_rate=0.1, negative_slope=0.1):
         super(ResidualBlock, self).__init__()
         self.conv = GCNConv(in_channels, out_channels, improved=True, add_self_loops=True, normalize=True)
         self.bn = nn.BatchNorm1d(out_channels)
         self.dropout = nn.Dropout(dropout_rate)
         self.shortcut = nn.Linear(in_channels, out_channels) if in_channels != out_channels else nn.Identity()
+        self.activation = nn.LeakyReLU(negative_slope=negative_slope)
+        self.negative_slope = negative_slope
         self.reset_parameters()
 
     def reset_parameters(self):
-        gain = nn.init.calculate_gain('relu')
+        gain = nn.init.calculate_gain('leaky_relu', self.negative_slope)
         nn.init.xavier_uniform_(self.conv.lin.weight, gain=gain)
         nn.init.zeros_(self.conv.bias)
         nn.init.constant_(self.bn.weight, 1)
@@ -337,10 +339,10 @@ class ResidualBlock(nn.Module):
         
         # 정규화된 인접 행렬을 사용하여 합성곱 적용
         x = self.conv(x, edge_index, norm)
-        
-        x = F.relu(self.bn(x))
+        x = self.activation(self.bn(x))
         x = self.dropout(x)
-        return F.relu(x + residual)
+        
+        return self.activation(x + residual)
     
 
 class Encoder(nn.Module):
@@ -386,12 +388,27 @@ class BertEncoder(nn.Module):
     def __init__(self, num_features, hidden_dims, nhead, num_layers, max_nodes, num_node_classes, dropout_rate=0.1):
         super(BertEncoder, self).__init__()
         encoder_layer = nn.TransformerEncoderLayer(
-            hidden_dims[-1], nhead, hidden_dims[-1] * 4, dropout_rate, activation='relu'
+            hidden_dims[-1], nhead, hidden_dims[-1] * 4, dropout_rate, activation='gelu'
         ) 
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers)
         self.mask_token = nn.Parameter(torch.randn(1, hidden_dims[-1]))
-        self.predicter = nn.Linear(hidden_dims[-1], num_features)
-        self.classifier = nn.Linear(num_features, num_node_classes)
+        
+        # self.predicter = nn.Linear(hidden_dims[-1], num_features)
+        self.predicter = nn.Sequential(
+            nn.Linear(hidden_dims[-1], hidden_dims[-1]),
+            nn.LeakyReLU(negative_slope=0.1),  # 음수 값도 처리 가능
+            nn.Dropout(dropout_rate),
+            nn.Linear(hidden_dims[-1], num_features)
+        )
+        
+        # self.classifier = nn.Linear(num_features, num_node_classes)
+        # Classifier - LeakyReLU 사용
+        self.classifier = nn.Sequential(
+            nn.Linear(num_features, hidden_dims[-1]),
+            nn.LeakyReLU(negative_slope=0.1),  # 음수 값도 처리 가능
+            nn.Dropout(dropout_rate),
+            nn.Linear(hidden_dims[-1], num_node_classes)
+        )
         self.dropout = nn.Dropout(dropout_rate)
         self.max_nodes = max_nodes
 
@@ -756,7 +773,7 @@ def run(dataset_name, random_seed, dataset_AN, trial, device=device):
     max_node_label = meta['max_node_label']
     
     # BERT 모델 저장 경로
-    bert_save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/BERT_model/pretrained_bert_{dataset_name}_fold{trial}_seed{random_seed}_BERT_epochs{BERT_epochs}_try2.pth'
+    bert_save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/BERT_model/pretrained_bert_{dataset_name}_fold{trial}_seed{random_seed}_BERT_epochs{BERT_epochs}_try1.pth'
     
     model = GRAPH_AUTOENCODER(
         num_features=num_features, 
