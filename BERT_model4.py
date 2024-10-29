@@ -85,9 +85,9 @@ def train(model, train_loader, recon_optimizer, max_nodes, device):
     num_sample = 0
     
     # BERT 인코더의 파라미터는 고정
-    model.encoder.eval()
-    for param in model.encoder.parameters():
-        param.requires_grad = False
+    # model.encoder.eval()
+    # for param in model.encoder.parameters():
+    #     param.requires_grad = True
         
     for data in train_loader:
         recon_optimizer.zero_grad()
@@ -95,16 +95,14 @@ def train(model, train_loader, recon_optimizer, max_nodes, device):
         x, edge_index, batch, num_graphs, node_label = data.x, data.edge_index, data.batch, data.num_graphs, data.node_label
         
         train_cls_outputs, z_ = model(x, edge_index, batch, num_graphs)
-
-        loss = 0
         
         kmeans, cluster_centers = perform_clustering(train_cls_outputs, random_seed, n_clusters=n_cluster)
         
         clu_loss = cluster_center_compactness_loss(cluster_centers)
         
-        loss += clu_loss
+        loss = clu_loss
         
-        print(f'train_adj_loss: {loss}')
+        print(f'train_clu_loss: {loss}')
         
         num_sample += num_graphs
 
@@ -149,7 +147,7 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
                 recon_error = min_distance.item()
                 recon_errors.append(recon_error)
                 
-                print(f'test_min_distance: {min_distance }')
+                print(f'test_min_distance: {min_distance}')
 
                 if data.y[i].item() == 0:
                     total_loss_ += recon_error
@@ -198,10 +196,14 @@ def cluster_center_compactness_loss(cluster_centers):
     loss : tensor
         클러스터 중심들이 가까워지도록 하는 손실 값
     """
+    cluster_centers = torch.tensor(cluster_centers, dtype=torch.float32, requires_grad=True)
     num_clusters = cluster_centers.size(0)
+    # num_clusters = len(cluster_centers).size(0)
+
     # 클러스터 중심 쌍의 유클리드 거리 계산
+
     distances = torch.cdist(cluster_centers, cluster_centers, p=2)  # shape (num_clusters, num_clusters)
-    
+
     # 자기 자신과의 거리는 제외하고 모든 거리를 합산
     mask = torch.ones_like(distances, dtype=torch.bool)
     mask.fill_diagonal_(0)  # 대각선 원소를 0으로 설정하여 자기 자신과의 거리 제외
@@ -709,11 +711,7 @@ def run(dataset_name, random_seed, dataset_AN, split=None, device=device):
         
     # 2단계: 재구성 학습
     print("\nStage 2: Training reconstruction...")
-    recon_optimizer = torch.optim.Adam(
-        model, 
-        lr=learning_rate,
-        weight_decay=weight_decay
-    )
+    recon_optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     # optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     # scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=factor, patience=patience, verbose=True)
 

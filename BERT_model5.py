@@ -246,9 +246,9 @@ parser.add_argument("--dropout-rate", type=float, default=0.1)
 parser.add_argument("--weight-decay", type=float, default=0.0001)
 parser.add_argument("--learning-rate", type=float, default=0.0001)
 
-parser.add_argument("--alpha", type=float, default=0.3)
+parser.add_argument("--alpha", type=float, default=1.0)
 parser.add_argument("--beta", type=float, default=0.05)
-parser.add_argument("--gamma", type=float, default=1.0)
+parser.add_argument("--gamma", type=float, default=0.1)
 parser.add_argument("--node-theta", type=float, default=0.03)
 parser.add_argument("--adj-theta", type=float, default=0.01)
 
