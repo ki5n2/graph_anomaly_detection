@@ -84,10 +84,13 @@ def train(model, train_loader, recon_optimizer, max_nodes, device):
     total_loss = 0
     num_sample = 0
     
-    # BERT 인코더의 파라미터는 고정
-    # model.encoder.eval()
-    # for param in model.encoder.parameters():
-    #     param.requires_grad = True
+    # GCN과 BERT 인코더의 파라미터는 고정
+    model.encoder.eval()
+    model.gcn_encoder.eval()
+    for param in model.encoder.parameters():
+        param.requires_grad = False
+    for param in model.gcn_encoder.parameters():
+        param.requires_grad = False
         
     for data in train_loader:
         recon_optimizer.zero_grad()
@@ -693,14 +696,15 @@ def run(dataset_name, random_seed, dataset_AN, split=None, device=device):
         # 1단계: BERT 임베딩 학습
         print("Stage 1: Training BERT embeddings...")
 
-        bert_optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-        bert_scheduler = ReduceLROnPlateau(bert_optimizer, mode='min', factor=factor, patience=patience)
+        pretrain_params = list(model.gcn_encoder.parameters()) + list(model.encoder.parameters())
+        bert_optimizer = torch.optim.Adam(pretrain_params, lr=learning_rate)
+        # bert_scheduler = ReduceLROnPlateau(bert_optimizer, mode='min', factor=factor, patience=patience)
     
         for epoch in range(1, BERT_epochs+1):
             train_loss, num_sample, node_embeddings = train_bert_embedding(
                 model, train_loader, bert_optimizer, device
             )
-            bert_scheduler.step(train_loss)
+            # bert_scheduler.step(train_loss)
             
             if epoch % log_interval == 0:
                 print(f'BERT Training Epoch {epoch}: Loss = {train_loss:.4f}')
@@ -711,6 +715,23 @@ def run(dataset_name, random_seed, dataset_AN, split=None, device=device):
         
     # 2단계: 재구성 학습
     print("\nStage 2: Training reconstruction...")
+
+    # recon_params = []
+    # for name, param in model.named_parameters():
+    #     if not name.startswith('encoder.') and not name.startswith('gcn_encoder.'):
+    #         recon_params.append(param)
+            
+    # recon_optimizer = torch.optim.Adam(
+    #     recon_params,
+    #     lr=learning_rate,
+    #     weight_decay=weight_decay
+    # )
+    
+    # for param in model.encoder.parameters():
+    #     param.requires_grad = False
+    # for param in model.gcn_encoder.parameters():
+    #     param.requires_grad = False
+    
     recon_optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     # optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     # scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=factor, patience=patience, verbose=True)

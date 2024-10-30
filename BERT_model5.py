@@ -61,16 +61,16 @@ def train_bert_embedding(model, train_loader, bert_optimizer, device):
         mask_indices = torch.rand(x.size(0), device=device) < 0.15  # 15% 노드 마스킹
         
         # BERT 인코딩 및 마스크 토큰 예측만 수행
-        _, z, _, masked_outputs, masked_outputs_ = model(
+        _, z, _, masked_outputs = model(
             x, edge_index, batch, num_graphs, mask_indices, training=True
         )
         
         # 마스크 예측 손실만 계산
         mask_loss = F.mse_loss(masked_outputs, x[mask_indices])
-        mask_loss_ = F.cross_entropy(masked_outputs_, node_label[mask_indices])
-        loss = mask_loss + mask_loss_
+        # mask_loss_ = F.cross_entropy(masked_outputs_, node_label[mask_indices])
+        loss = mask_loss
         print(f'mask_node_feature:{mask_loss}')
-        print(f'mask_label:{mask_loss_}')
+        # print(f'mask_label:{mask_loss_}')
         
         loss.backward()
         bert_optimizer.step()
@@ -227,7 +227,7 @@ parser.add_argument("--assets-root", type=str, default="./assets")
 
 parser.add_argument("--n-head", type=int, default=8)
 parser.add_argument("--n-layer", type=int, default=8)
-parser.add_argument("--BERT-epochs", type=int, default=100)
+parser.add_argument("--BERT-epochs", type=int, default=300)
 parser.add_argument("--epochs", type=int, default=200)
 parser.add_argument("--patience", type=int, default=5)
 parser.add_argument("--n-cluster", type=int, default=3)
@@ -246,9 +246,9 @@ parser.add_argument("--dropout-rate", type=float, default=0.1)
 parser.add_argument("--weight-decay", type=float, default=0.0001)
 parser.add_argument("--learning-rate", type=float, default=0.0001)
 
-parser.add_argument("--alpha", type=float, default=1.0)
+parser.add_argument("--alpha", type=float, default=10.0)
 parser.add_argument("--beta", type=float, default=0.05)
-parser.add_argument("--gamma", type=float, default=0.01)
+parser.add_argument("--gamma", type=float, default=0.1)
 parser.add_argument("--node-theta", type=float, default=0.03)
 parser.add_argument("--adj-theta", type=float, default=0.01)
 
@@ -403,12 +403,12 @@ class BertEncoder(nn.Module):
         
         # self.classifier = nn.Linear(num_features, num_node_classes)
         # Classifier - LeakyReLU 사용
-        self.classifier = nn.Sequential(
-            nn.Linear(num_features, hidden_dims[-1]),
-            nn.LeakyReLU(negative_slope=0.1),  # 음수 값도 처리 가능
-            nn.Dropout(dropout_rate),
-            nn.Linear(hidden_dims[-1], num_node_classes)
-        )
+        # self.classifier = nn.Sequential(
+        #     nn.Linear(num_features, hidden_dims[-1]),
+        #     nn.LeakyReLU(negative_slope=0.1),  # 음수 값도 처리 가능
+        #     nn.Dropout(dropout_rate),
+        #     nn.Linear(hidden_dims[-1], num_node_classes)
+        # )
         self.dropout = nn.Dropout(dropout_rate)
         self.max_nodes = max_nodes
 
@@ -451,7 +451,7 @@ class BertEncoder(nn.Module):
         # 결과 처리
         node_embeddings = []
         outputs = []
-        outputs_ = []
+        # outputs_ = []
         
         for i in range(batch_size):
             mask = (batch == i)
@@ -465,15 +465,15 @@ class BertEncoder(nn.Module):
                 if mask_pos.any():
                     masked_output = self.predicter(graph_encoded[mask_pos])
                     outputs.append(masked_output)
-                    masked_output_ = self.classifier(masked_output)
-                    outputs_.append(masked_output_)
+                    # masked_output_ = self.classifier(masked_output)
+                    # outputs_.append(masked_output_)
         
         node_embeddings = torch.cat(node_embeddings, dim=0)
         
         if training and mask_indices is not None and outputs:
             outputs = torch.cat(outputs, dim=0)
-            outputs_ = torch.cat(outputs_, dim=0)
-            return node_embeddings, outputs, outputs_
+            # outputs_ = torch.cat(outputs_, dim=0)
+            return node_embeddings, outputs
         
         return node_embeddings
     
@@ -657,7 +657,7 @@ class GRAPH_AUTOENCODER(nn.Module):
         
         # BERT 인코딩
         if training and mask_indices is not None:
-            z, masked_outputs, masked_outputs_ = self.encoder(
+            z, masked_outputs = self.encoder(
                 h, batch, mask_indices, training=True
             )
         else:
@@ -724,7 +724,7 @@ class GRAPH_AUTOENCODER(nn.Module):
         z_ = self.encoder(h_, batch, training=False)
         
         if training and mask_indices is not None:
-            return cls_output, z, z_, masked_outputs, masked_outputs_
+            return cls_output, z, z_, masked_outputs
         
         return cls_output, z, z_
 
