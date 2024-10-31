@@ -405,15 +405,16 @@ class BertEncoder(nn.Module):
         self.d_model = d_model
 
     def forward(self, x, edge_index, batch, mask_indices=None, training=True):
-        # 입력 프로젝션
+        # 1. 입력 프로젝션
         h = self.input_projection(x)  # [num_nodes, hidden_dim]
-
         batch_size = batch.max().item() + 1
         
+        # 2. CLS 토큰과 포지셔널 인코딩이 적용된 시퀀스 얻기
         cls_token = self.cls_token.repeat(1, 1, 1)  # [1, 1, hidden_dim]    
         z_with_cls_batch = self.cls_with_position(h, edge_index, batch, cls_token)
         seq_len = z_with_cls_batch.size(1)
-    
+
+        # 3. 마스킹 적용 준비
         padding_mask = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=x.device)
         mask_positions = torch.zeros_like(padding_mask)
     
