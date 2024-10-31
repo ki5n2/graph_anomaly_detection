@@ -398,24 +398,6 @@ class BertEncoder(nn.Module):
         nn.init.normal_(self.mask_token, std=0.02)
         
         self.predicter = nn.Linear(hidden_dims[-1], num_features)
-        # self.predicter = nn.Sequential(
-        #     nn.Linear(hidden_dims[-1], hidden_dims[-1]),
-        #     nn.LeakyReLU(negative_slope=0.1),  # 음수 값도 처리 가능
-        #     nn.Dropout(dropout_rate),
-        #     nn.Linear(hidden_dims[-1], num_features)
-        # )
-        
-        # self.predicter = nn.Sequential(
-        #     nn.Linear(hidden_dims[-1], hidden_dims[-1] * 2),
-        #     nn.LayerNorm(hidden_dims[-1] * 2),
-        #     nn.GELU(),
-        #     nn.Dropout(dropout_rate),
-        #     nn.Linear(hidden_dims[-1] * 2, hidden_dims[-1]),
-        #     nn.LayerNorm(hidden_dims[-1]),
-        #     nn.GELU(),
-        #     nn.Dropout(dropout_rate),
-        #     nn.Linear(hidden_dims[-1], num_features)  # 마지막 레이어에는 활성화 함수 없음
-        # )
         
         self.cls_token = nn.Parameter(torch.randn(1, 1, hidden_dims[-1]))
         self.dropout = nn.Dropout(dropout_rate)
@@ -429,16 +411,12 @@ class BertEncoder(nn.Module):
         batch_size = batch.max().item() + 1
         
         cls_token = self.cls_token.repeat(1, 1, 1)  # [1, 1, hidden_dim]    
-        z_with_cls_batch = cls_with_position(h, edge_index, batch, cls_token)
+        z_with_cls_batch = self.cls_with_position(h, edge_index, batch, cls_token)
         seq_len = z_with_cls_batch.size(1)
     
         padding_mask = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=x.device)
         mask_positions = torch.zeros_like(padding_mask)
     
-        # # 배치 내 모든 그래프를 동시에 처리하기 위한 패딩된 텐서 생성
-        # padded_tensor = torch.zeros(batch_size, max_seq_len, h.size(-1), device=h.device)
-        # padding_mask = torch.ones(batch_size, max_seq_len, dtype=torch.bool, device=h.device)
-        # 마스크된 위치 추적을 위한 텐서
         if training and mask_indices is not None:
             start_idx = 0
             for i in range(batch_size):
@@ -495,7 +473,6 @@ class BertEncoder(nn.Module):
             return node_embeddings, masked_outputs
         
         return node_embeddings
-    
     
     
     def cls_with_position(self, h, edge_index, batch, cls_token):

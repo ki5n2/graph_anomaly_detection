@@ -226,9 +226,9 @@ parser.add_argument("--dataset-name", type=str, default='COX2')
 parser.add_argument("--data-root", type=str, default='./dataset')
 parser.add_argument("--assets-root", type=str, default="./assets")
 
-parser.add_argument("--n-head", type=int, default=8)
-parser.add_argument("--n-layer", type=int, default=8)
-parser.add_argument("--BERT-epochs", type=int, default=300)
+parser.add_argument("--n-head", type=int, default=2)
+parser.add_argument("--n-layer", type=int, default=2)
+parser.add_argument("--BERT-epochs", type=int, default=100)
 parser.add_argument("--epochs", type=int, default=200)
 parser.add_argument("--patience", type=int, default=5)
 parser.add_argument("--n-cluster", type=int, default=3)
@@ -386,7 +386,7 @@ class FeatureDecoder(nn.Module):
     
 #%%
 class BertEncoder(nn.Module):
-    def __init__(self, num_features, hidden_dims, nhead, num_layers, max_nodes, num_node_classes, dropout_rate=0.1):
+    def __init__(self, num_features, hidden_dims, d_model, nhead, num_layers, max_nodes, num_node_classes, dropout_rate=0.1):
         super(BertEncoder, self).__init__()
         encoder_layer = nn.TransformerEncoderLayer(
             hidden_dims[-1], nhead, hidden_dims[-1] * 4, dropout_rate, activation='gelu'
@@ -426,6 +426,7 @@ class BertEncoder(nn.Module):
         
         self.dropout = nn.Dropout(dropout_rate)
         self.max_nodes = max_nodes
+        self.d_model = d_model
 
     def forward(self, h, batch, mask_indices=None, training=True):
         batch_size = batch.max().item() + 1
@@ -561,7 +562,6 @@ class GraphBertPositionalEncoding(nn.Module):
 class TransformerEncoder(nn.Module):
     def __init__(self, d_model, nhead, num_layers, dim_feedforward, max_nodes, dropout=0.1):
         super(TransformerEncoder, self).__init__()
-        self.positional_encoding = GraphBertPositionalEncoding(d_model, max_nodes)
         encoder_layer = nn.TransformerEncoderLayer(
             d_model, nhead, dim_feedforward, dropout, activation='relu'
         )
@@ -788,7 +788,7 @@ def run(dataset_name, random_seed, dataset_AN, trial, device=device):
     max_node_label = meta['max_node_label']
     
     # BERT 모델 저장 경로
-    bert_save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/BERT_model/pretrained_bert_{dataset_name}_fold{trial}_seed{random_seed}_BERT_epochs{BERT_epochs}_try0.pth'
+    bert_save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/BERT_model/pretrained_bert_{dataset_name}_fold{trial}_nhead{n_head}_seed{random_seed}_BERT_epochs{BERT_epochs}_try0.pth'
     
     model = GRAPH_AUTOENCODER(
         num_features=num_features, 
