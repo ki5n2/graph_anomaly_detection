@@ -307,61 +307,6 @@ os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
 # %%
 '''MODEL CONSTRUCTION'''
-class ResidualBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, dropout_rate=0.1, negative_slope=0.1):
-        super(ResidualBlock, self).__init__()
-        self.conv = GCNConv(in_channels, out_channels, improved=True, add_self_loops=True, normalize=True)
-        self.bn = nn.BatchNorm1d(out_channels)
-        self.dropout = nn.Dropout(dropout_rate)
-        self.shortcut = nn.Linear(in_channels, out_channels) if in_channels != out_channels else nn.Identity()
-        self.activation = nn.LeakyReLU(negative_slope=negative_slope)
-        self.negative_slope = negative_slope
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        gain = nn.init.calculate_gain('leaky_relu', self.negative_slope)
-        nn.init.xavier_uniform_(self.conv.lin.weight, gain=gain)
-        nn.init.zeros_(self.conv.bias)
-        nn.init.constant_(self.bn.weight, 1)
-        nn.init.constant_(self.bn.bias, 0)
-        if isinstance(self.shortcut, nn.Linear):
-            nn.init.xavier_uniform_(self.shortcut.weight, gain=1.0)
-            nn.init.zeros_(self.shortcut.bias)
-
-    def forward(self, x, edge_index):
-        residual = self.shortcut(x)
-        
-        # 정규화 트릭 적용
-        edge_index, _ = utils.add_self_loops(edge_index, num_nodes=x.size(0))
-        deg = utils.degree(edge_index[0], x.size(0), dtype=x.dtype)
-        deg_inv_sqrt = deg.pow(-0.5)
-        deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
-        norm = deg_inv_sqrt[edge_index[0]] * deg_inv_sqrt[edge_index[1]]
-        
-        # 정규화된 인접 행렬을 사용하여 합성곱 적용
-        x = self.conv(x, edge_index, norm)
-        x = self.activation(self.bn(x))
-        x = self.dropout(x)
-        
-        return self.activation(x + residual)
-    
-
-class Encoder(nn.Module):
-    def __init__(self, num_features, hidden_dims, dropout_rate=0.1):
-        super(Encoder, self).__init__()
-        self.blocks = nn.ModuleList()
-        dims = [num_features] + hidden_dims
-        for i in range(len(dims) - 1):
-            self.blocks.append(ResidualBlock(dims[i], dims[i+1], dropout_rate))
-        self.dropout = nn.Dropout(dropout_rate)
-
-    def forward(self, x, edge_index):
-        for block in self.blocks:
-            x = block(x, edge_index)
-            x = self.dropout(x)
-        return F.normalize(x, p=2, dim=1)
-    
-
 class FeatureDecoder(nn.Module):
     def __init__(self, embed_dim, num_features, dropout_rate=0.1):
         super(FeatureDecoder, self).__init__()
@@ -411,7 +356,7 @@ class BertEncoder(nn.Module):
         
         # 2. CLS 토큰과 포지셔널 인코딩이 적용된 시퀀스 얻기
         cls_token = self.cls_token.repeat(1, 1, 1)  # [1, 1, hidden_dim]    
-        z_with_cls_batch = self.cls_with_position(h, edge_index, batch, cls_token)
+        z_with_cls_batch = self.cls_with_position(h, edge_index, batch, cls_token)  # [batch_size, seq_len, hidden_dim]
         seq_len = z_with_cls_batch.size(1)
 
         # 3. 마스킹 적용 준비
@@ -574,7 +519,8 @@ class GraphBertPositionalEncoding(nn.Module):
                         path_length = nx.shortest_path_length(G, source=i, target=j)
                     except nx.NetworkXNoPath:
                         path_length = self.max_nodes  # 연결되지 않은 경우 최대 거리 할당
-                    spl_matrix[i, j] = path_length
+                    if j < self.max_nodes:  # 범위 체크 추가
+                        spl_matrix[i, j] = path_length
 
         return spl_matrix.to(edge_index.device)
     
