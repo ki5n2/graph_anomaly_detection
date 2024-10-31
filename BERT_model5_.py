@@ -498,7 +498,7 @@ class BertEncoder(nn.Module):
     
     
     
-    def cls_with_position(self, h, edge_index, cls_token):
+    def cls_with_position(self, h, edge_index, batch, cls_token):
         batch_size = batch.max().item() + 1
         z_list = [h[batch == i] for i in range(batch_size)] # 그래프 별 z 저장 (batch_size, num nodes, feature dim)
         edge_index_list = [] # 그래프 별 엣지 인덱스 저장 (batch_size), edge_index_list[0] = (2 x m), m is # of edges
