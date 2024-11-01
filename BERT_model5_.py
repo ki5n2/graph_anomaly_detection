@@ -226,10 +226,10 @@ parser.add_argument("--dataset-name", type=str, default='COX2')
 parser.add_argument("--data-root", type=str, default='./dataset')
 parser.add_argument("--assets-root", type=str, default="./assets")
 
-parser.add_argument("--n-head", type=int, default=2)
-parser.add_argument("--n-layer", type=int, default=2)
+parser.add_argument("--n-head", type=int, default=4)
+parser.add_argument("--n-layer", type=int, default=4)
 parser.add_argument("--BERT-epochs", type=int, default=300)
-parser.add_argument("--epochs", type=int, default=500)
+parser.add_argument("--epochs", type=int, default=300)
 parser.add_argument("--patience", type=int, default=5)
 parser.add_argument("--n-cluster", type=int, default=3)
 parser.add_argument("--step-size", type=int, default=20)
@@ -239,7 +239,7 @@ parser.add_argument("--batch-size", type=int, default=300)
 parser.add_argument("--log-interval", type=int, default=5)
 parser.add_argument("--n-test-anomaly", type=int, default=400)
 parser.add_argument("--test-batch-size", type=int, default=128)
-parser.add_argument("--hidden-dims", nargs='+', type=int, default=[256, 128])
+parser.add_argument("--hidden-dims", nargs='+', type=int, default=[512])
 
 parser.add_argument("--factor", type=float, default=0.5)
 parser.add_argument("--test-size", type=float, default=0.25)
@@ -450,8 +450,12 @@ class BertEncoder(nn.Module):
             transformed, batch, mask_positions if training and mask_indices is not None else None
         )
         
-        if training and mask_indices is not None and masked_outputs:
-            return node_embeddings, torch.cat(masked_outputs, dim=0)
+        # if training and mask_indices is not None and masked_outputs:
+        #     return node_embeddings, torch.cat(masked_outputs, dim=0)
+        # 학습 중이고 마스크된 노드가 있는 경우에만 마스크된 출력 반환
+        if training and mask_indices is not None and masked_outputs is not None:
+            return node_embeddings, masked_outputs
+        
         return node_embeddings
 
     def _apply_masking(self, z_with_cls_batch, padding_mask, batch, mask_indices):
@@ -471,6 +475,27 @@ class BertEncoder(nn.Module):
             
         return mask_positions
 
+    # def _process_outputs(self, transformed, batch, mask_positions=None):
+    #     node_embeddings = []
+    #     masked_outputs = []
+    #     batch_size = transformed.size(0)
+    #     start_idx = 0
+        
+    #     for i in range(batch_size):
+    #         mask = (batch == i)
+    #         num_nodes = mask.sum().item()
+    #         graph_encoded = transformed[i, 1:num_nodes+1]
+    #         node_embeddings.append(graph_encoded)
+            
+    #         if mask_positions is not None:
+    #             current_mask_positions = mask_positions[i, 1:num_nodes+1]
+    #             if current_mask_positions.any():
+    #                 masked_outputs.append(self.predicter(graph_encoded[current_mask_positions]))
+            
+    #         start_idx += num_nodes
+            
+    #     return torch.cat(node_embeddings, dim=0), masked_outputs
+
     def _process_outputs(self, transformed, batch, mask_positions=None):
         node_embeddings = []
         masked_outputs = []
@@ -480,17 +505,28 @@ class BertEncoder(nn.Module):
         for i in range(batch_size):
             mask = (batch == i)
             num_nodes = mask.sum().item()
+            # CLS 토큰을 제외한 노드 임베딩 추출
             graph_encoded = transformed[i, 1:num_nodes+1]
             node_embeddings.append(graph_encoded)
             
+            # 전체 노드에 대해 예측 수행
+            all_predictions = self.predicter(graph_encoded)
+            
+            # 마스크된 위치의 예측값만 선택
             if mask_positions is not None:
                 current_mask_positions = mask_positions[i, 1:num_nodes+1]
                 if current_mask_positions.any():
-                    masked_outputs.append(self.predicter(graph_encoded[current_mask_positions]))
+                    masked_predictions = all_predictions[current_mask_positions]
+                    masked_outputs.append(masked_predictions)
             
             start_idx += num_nodes
-            
-        return torch.cat(node_embeddings, dim=0), masked_outputs
+        
+        node_embeddings = torch.cat(node_embeddings, dim=0)
+        
+        # 전체 예측값과 마스크된 위치의 예측값 반환
+        if mask_positions is not None and masked_outputs:
+            return node_embeddings, torch.cat(masked_outputs, dim=0)
+        return node_embeddings, None
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -741,7 +777,7 @@ def run(dataset_name, random_seed, dataset_AN, trial, device=device):
     max_node_label = meta['max_node_label']
     
     # BERT 모델 저장 경로
-    bert_save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/BERT_model/pretrained_bert_{dataset_name}_fold{trial}_nhead{n_head}_seed{random_seed}_BERT_epochs{BERT_epochs}_try5.pth'
+    bert_save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/BERT_model/pretrained_bert_{dataset_name}_fold{trial}_nhead{n_head}_seed{random_seed}_BERT_epochs{BERT_epochs}_linear{hidden_dims[-1]}_try5.pth'
     
     model = GRAPH_AUTOENCODER(
         num_features=num_features, 
