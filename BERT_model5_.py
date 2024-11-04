@@ -226,9 +226,9 @@ parser.add_argument("--dataset-name", type=str, default='COX2')
 parser.add_argument("--data-root", type=str, default='./dataset')
 parser.add_argument("--assets-root", type=str, default="./assets")
 
-parser.add_argument("--n-head", type=int, default=4)
-parser.add_argument("--n-layer", type=int, default=4)
-parser.add_argument("--BERT-epochs", type=int, default=300)
+parser.add_argument("--n-head", type=int, default=2)
+parser.add_argument("--n-layer", type=int, default=2)
+parser.add_argument("--BERT-epochs", type=int, default=100)
 parser.add_argument("--epochs", type=int, default=300)
 parser.add_argument("--patience", type=int, default=5)
 parser.add_argument("--n-cluster", type=int, default=3)
@@ -239,7 +239,7 @@ parser.add_argument("--batch-size", type=int, default=300)
 parser.add_argument("--log-interval", type=int, default=5)
 parser.add_argument("--n-test-anomaly", type=int, default=400)
 parser.add_argument("--test-batch-size", type=int, default=128)
-parser.add_argument("--hidden-dims", nargs='+', type=int, default=[512])
+parser.add_argument("--hidden-dims", nargs='+', type=int, default=[128])
 
 parser.add_argument("--factor", type=float, default=0.5)
 parser.add_argument("--test-size", type=float, default=0.25)
@@ -647,18 +647,36 @@ class TransformerEncoder(nn.Module):
     def __init__(self, d_model, nhead, num_layers, dim_feedforward, max_nodes, dropout=0.1):
         super(TransformerEncoder, self).__init__()
         encoder_layer = nn.TransformerEncoderLayer(
-            d_model, nhead, dim_feedforward, dropout, activation='relu'
+            d_model, nhead, dim_feedforward, dropout, activation='relu', batch_first = True
         )
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers)
         self.d_model = d_model
 
     def forward(self, src, src_key_padding_mask):
-        src = src.transpose(0, 1)  # [seq_len, batch_size, hidden_dim]
+        # src = src.transpose(0, 1)  # [seq_len, batch_size, hidden_dim]
         output = self.transformer_encoder(src, src_key_padding_mask=src_key_padding_mask)
-        output = output.transpose(0, 1)  # [batch_size, seq_len, hidden_dim]
+        # src [batch_size, seq_len, hidden_dim]
+        # output = output.transpose(0, 1)  # [batch_size, seq_len, hidden_dim]
         return output
     
+
+class TransformerEncoder_d(nn.Module):
+    def __init__(self, d_model, nhead, num_layers, dim_feedforward, max_nodes, dropout=0.1):
+        super(TransformerEncoder_d, self).__init__()
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model, nhead, dim_feedforward, dropout, activation='relu', batch_first = True
+        )
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers)
+        self.d_model = d_model
+
+    def forward(self, src, src_key_padding_mask):
+        # src = src.transpose(0, 1)  # [seq_len, batch_size, hidden_dim]
+        output = self.transformer_encoder(src, src_key_padding_mask=src_key_padding_mask)
+        # src [batch_size, seq_len, hidden_dim]
+        # output = output.transpose(0, 1)  # [batch_size, seq_len, hidden_dim]
+        return output
     
+        
 #%%
 def perform_clustering(train_cls_outputs, random_seed, n_clusters):
     # train_cls_outputs가 이미 텐서이므로, 그대로 사용
@@ -689,7 +707,7 @@ class GRAPH_AUTOENCODER(nn.Module):
             num_node_classes=num_node_labels,
             dropout_rate=dropout_rate
         )
-        self.transformer = TransformerEncoder(
+        self.transformer_d = TransformerEncoder_d(
             d_model=hidden_dims[-1],
             nhead=nhead,
             num_layers=num_layers,
@@ -719,7 +737,7 @@ class GRAPH_AUTOENCODER(nn.Module):
         )
         
         # Transformer 처리 - 수정된 부분
-        encoded = self.transformer(z_with_cls_batch, mask)  # edge_index_list 제거
+        encoded = self.transformer_d(z_with_cls_batch, mask)  # edge_index_list 제거
         
         # 출력 처리
         cls_output = encoded[:, 0, :]
@@ -734,7 +752,6 @@ class GRAPH_AUTOENCODER(nn.Module):
         if training and mask_indices is not None:
             return cls_output, x_recon, masked_outputs
         return cls_output, x_recon
-
 
 
 def perform_clustering(train_cls_outputs, random_seed, n_clusters):
@@ -777,7 +794,7 @@ def run(dataset_name, random_seed, dataset_AN, trial, device=device):
     max_node_label = meta['max_node_label']
     
     # BERT 모델 저장 경로
-    bert_save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/BERT_model/pretrained_bert_{dataset_name}_fold{trial}_nhead{n_head}_seed{random_seed}_BERT_epochs{BERT_epochs}_linear{hidden_dims[-1]}_try5.pth'
+    bert_save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/BERT_model/pretrained_bert_{dataset_name}_fold{trial}_nhead{n_head}_seed{random_seed}_BERT_epochs{BERT_epochs}_linear{hidden_dims[-1]}_transbatchfirst_try6.pth'
     
     model = GRAPH_AUTOENCODER(
         num_features=num_features, 
@@ -800,7 +817,7 @@ def run(dataset_name, random_seed, dataset_AN, trial, device=device):
     if os.path.exists(bert_save_path):
         print("Loading pretrained BERT...")
         # BERT 인코더의 가중치만 로드
-        model.encoder.load_state_dict(torch.load(bert_save_path))
+        model.encoder.load_state_dict(torch.load(bert_save_path, weights_only=True))
     else:
         print("Training BERT from scratch...")
         # 1단계: BERT 임베딩 학습
