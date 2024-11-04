@@ -392,7 +392,7 @@ class BertEncoder(nn.Module):
         self.input_projection = nn.Linear(num_features, hidden_dims[-1])
         self.positional_encoding = GraphBertPositionalEncoding(hidden_dims[-1], max_nodes)
         encoder_layer = nn.TransformerEncoderLayer(
-            hidden_dims[-1], nhead, hidden_dims[-1] * 4, dropout_rate, activation='gelu'
+            hidden_dims[-1], nhead, hidden_dims[-1] * 4, dropout_rate, activation='gelu', batch_first=True
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers)
         self.mask_token = nn.Parameter(torch.randn(1, hidden_dims[-1]))
@@ -441,9 +441,11 @@ class BertEncoder(nn.Module):
                 
         # Transformer 처리
         transformed = self.transformer(
-            z_with_cls_batch.transpose(0, 1),
+            z_with_cls_batch,
+            # z_with_cls_batch.transpose(0, 1),
             src_key_padding_mask=padding_mask
-        ).transpose(0, 1)
+        )
+        # ).transpose(0, 1)
         
         # 결과 추출
         node_embeddings, masked_outputs = self._process_outputs(
@@ -660,21 +662,21 @@ class TransformerEncoder(nn.Module):
         return output
     
 
-class TransformerEncoder_d(nn.Module):
-    def __init__(self, d_model, nhead, num_layers, dim_feedforward, max_nodes, dropout=0.1):
-        super(TransformerEncoder_d, self).__init__()
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model, nhead, dim_feedforward, dropout, activation='relu', batch_first = True
-        )
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers)
-        self.d_model = d_model
+# class TransformerEncoder_d(nn.Module):
+#     def __init__(self, d_model, nhead, num_layers, dim_feedforward, max_nodes, dropout=0.1):
+#         super(TransformerEncoder_d, self).__init__()
+#         encoder_layer = nn.TransformerEncoderLayer(
+#             d_model, nhead, dim_feedforward, dropout, activation='relu', batch_first = True
+#         )
+#         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers)
+#         self.d_model = d_model
 
-    def forward(self, src, src_key_padding_mask):
-        # src = src.transpose(0, 1)  # [seq_len, batch_size, hidden_dim]
-        output = self.transformer_encoder(src, src_key_padding_mask=src_key_padding_mask)
-        # src [batch_size, seq_len, hidden_dim]
-        # output = output.transpose(0, 1)  # [batch_size, seq_len, hidden_dim]
-        return output
+#     def forward(self, src, src_key_padding_mask):
+#         # src = src.transpose(0, 1)  # [seq_len, batch_size, hidden_dim]
+#         output = self.transformer_encoder(src, src_key_padding_mask=src_key_padding_mask)
+#         # src [batch_size, seq_len, hidden_dim]
+#         # output = output.transpose(0, 1)  # [batch_size, seq_len, hidden_dim]
+#         return output
     
         
 #%%
@@ -707,7 +709,7 @@ class GRAPH_AUTOENCODER(nn.Module):
             num_node_classes=num_node_labels,
             dropout_rate=dropout_rate
         )
-        self.transformer_d = TransformerEncoder_d(
+        self.transformer_d = TransformerEncoder(
             d_model=hidden_dims[-1],
             nhead=nhead,
             num_layers=num_layers,
