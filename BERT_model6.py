@@ -62,7 +62,7 @@ def train_bert_embedding(model, train_loader, bert_optimizer, device):
         
         # BERT 인코딩 및 마스크 토큰 예측만 수행
         _, _, masked_outputs = model(
-            x, edge_index, batch, num_graphs, mask_indices, training=True
+            x, edge_index, batch, num_graphs, mask_indices, training=True, edge_training=False
         )
         
         # 마스크 예측 손실만 계산
@@ -92,15 +92,26 @@ def train_bert_embedding_(model, train_loader, bert_optimizer, mask_indices, dev
         data = data.to(device)
         x, edge_index, batch, num_graphs, node_label = data.x, data.edge_index, data.batch, data.num_graphs, data.node_label
         
-         # BERT 인코딩 및 마스크 토큰 예측만 수행
-        _, _, masked_outputs = model(
-            x, edge_index, batch, num_graphs, mask_indices, training=True
+        adj = adj_original(edge_index, batch, max_nodes)
+        
+        # BERT 인코딩 및 마스크 토큰 예측만 수행
+        _, _, masked_outputs, adj_recon_list = model(
+            x, edge_index, batch, num_graphs, mask_indices, training=True, edge_training=True
         )
 
-        mask_loss = torch.norm(masked_outputs - x[mask_indices], p='fro')**2 / mask_indices.sum()
-        # mask_loss_ = F.cross_entropy(masked_outputs_, node_label[mask_indices])
-        loss = mask_loss
-        print(f'mask_node_feature:{mask_loss}')
+        loss = 0
+        start_node = 0
+        for i in range(num_graphs):
+            num_nodes = (batch == i).sum().item()
+            end_node = start_node + num_nodes
+            
+            adj_loss = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2 / num_nodes
+            adj_loss = adj_loss / 20
+            loss += adj_loss
+            
+            start_node = end_node
+            
+        print(f'edge_loss:{loss}')
         # print(f'mask_label:{mask_loss_}')
         
         loss.backward()
@@ -269,7 +280,7 @@ parser.add_argument("--batch-size", type=int, default=300)
 parser.add_argument("--log-interval", type=int, default=5)
 parser.add_argument("--n-test-anomaly", type=int, default=400)
 parser.add_argument("--test-batch-size", type=int, default=128)
-parser.add_argument("--hidden-dims", nargs='+', type=int, default=[128])
+parser.add_argument("--hidden-dims", nargs='+', type=int, default=[256])
 
 parser.add_argument("--factor", type=float, default=0.5)
 parser.add_argument("--test-size", type=float, default=0.25)
@@ -413,13 +424,34 @@ class FeatureDecoder(nn.Module):
         z = self.fc2(z)
         return z
     
+
+class BilinearEdgeDecoder(nn.Module):
+    def __init__(self, max_nodes):
+        super(BilinearEdgeDecoder, self).__init__()
+        self.max_nodes = max_nodes
+        self.sigmoid = nn.Sigmoid()
+    
+    def forward(self, z):
+        actual_nodes = z.size(0)
+        
+        z_norm = F.normalize(z, p=2, dim=1) # 각 노드 벡터를 정규화
+        cos_sim = torch.mm(z_norm, z_norm.t()) # 코사인 유사도 계산 (내적으로 계산됨)
+        adj = self.sigmoid(cos_sim)
+        adj = adj * (1 - torch.eye(actual_nodes, device=z.device))
+        
+        # max_nodes 크기로 패딩
+        padded_adj = torch.zeros(self.max_nodes, self.max_nodes, device=z.device)
+        padded_adj[:actual_nodes, :actual_nodes] = adj
+        
+        return padded_adj
+
     
 #%%
 class BertEncoder(nn.Module):
     def __init__(self, num_features, hidden_dims, d_model, nhead, num_layers, max_nodes, num_node_classes, dropout_rate=0.1):
         super().__init__()
-        # self.gcn_encoder = Encoder(num_features, hidden_dims, dropout_rate)
-        self.input_projection = nn.Linear(num_features, hidden_dims[-1])
+        self.gcn_encoder = Encoder(num_features, hidden_dims, dropout_rate)
+        # self.input_projection = nn.Linear(num_features, hidden_dims[-1])
         self.positional_encoding = GraphBertPositionalEncoding(hidden_dims[-1], max_nodes)
         encoder_layer = nn.TransformerEncoderLayer(
             hidden_dims[-1], nhead, hidden_dims[-1] * 4, dropout_rate, activation='gelu', batch_first = True
@@ -428,6 +460,7 @@ class BertEncoder(nn.Module):
         self.mask_token = nn.Parameter(torch.randn(1, hidden_dims[-1]))
         self.predicter = nn.Linear(hidden_dims[-1], num_features)
         self.cls_token = nn.Parameter(torch.randn(1, 1, hidden_dims[-1]))
+        self.edge_decoder = BilinearEdgeDecoder(max_nodes)
         
         self.dropout = nn.Dropout(dropout_rate)
         self.max_nodes = max_nodes
@@ -436,9 +469,9 @@ class BertEncoder(nn.Module):
         # 가중치 초기화
         self.apply(self._init_weights)
 
-    def forward(self, x, edge_index, batch, mask_indices=None, training=True):
-        # h = self.gcn_encoder(x, edge_index)
-        h = self.input_projection(x)
+    def forward(self, x, edge_index, batch, num_graphs, mask_indices=None, training=True, edge_training=False):
+        h = self.gcn_encoder(x, edge_index)
+        # h = self.input_projection(x)
         
         # 배치 처리
         z_list, edge_index_list, max_nodes_in_batch = BatchUtils.process_batch(h, edge_index, batch)
@@ -465,6 +498,7 @@ class BertEncoder(nn.Module):
                 graph_mask_indices = mask_indices[start_idx:start_idx + num_nodes]
                 mask_positions[i, 1:num_nodes+1] = graph_mask_indices
                 node_indices = mask_positions[i].nonzero().squeeze(-1)
+                # mask_token = mask_token.to(device)
                 z_with_cls_batch[i, node_indices] = self.mask_token
                 padding_mask[i, num_nodes+1:] = True
                 start_idx += num_nodes
@@ -482,12 +516,28 @@ class BertEncoder(nn.Module):
             transformed, batch, mask_positions if training and mask_indices is not None else None
         )
         
+        if training and edge_training and mask_indices is not None:
+            adj_recon_list = []
+            idx = 0
+            for i in range(num_graphs):
+                num_nodes = z_list[i].size(0)
+                # z_graph = u_prime[idx:idx + num_nodes]
+                z_graph = node_embeddings[idx:idx + num_nodes]
+                adj_recon = self.edge_decoder(z_graph)
+                adj_recon_list.append(adj_recon)
+                idx += num_nodes
+            
         # if training and mask_indices is not None and masked_outputs:
         #     return node_embeddings, torch.cat(masked_outputs, dim=0)
         # 학습 중이고 마스크된 노드가 있는 경우에만 마스크된 출력 반환
+        # if training and mask_indices is not None and masked_outputs is not None:
+        #     return node_embeddings, masked_outputs
         if training and mask_indices is not None and masked_outputs is not None:
-            return node_embeddings, masked_outputs
-        
+            if edge_training:
+                return node_embeddings, masked_outputs, adj_recon_list
+            else:
+                return node_embeddings, masked_outputs
+
         return node_embeddings
 
     def _apply_masking(self, z_with_cls_batch, padding_mask, batch, mask_indices):
@@ -755,12 +805,15 @@ class GRAPH_AUTOENCODER(nn.Module):
         )
         self.cls_token = nn.Parameter(torch.randn(1, 1, hidden_dims[-1]))
 
-    def forward(self, x, edge_index, batch, num_graphs, mask_indices=None, training=True):
+    def forward(self, x, edge_index, batch, num_graphs, mask_indices=None, training=True, edge_training=False):
         # BERT 인코딩
         if training and mask_indices is not None:
-            z, masked_outputs = self.encoder(x, edge_index, batch, mask_indices, training=True)
+            if edge_training:
+                z, masked_outputs, adj_recon_list = self.encoder(x, edge_index, batch, num_graphs, mask_indices, training=True, edge_training=True)
+            else:
+                z, masked_outputs = self.encoder(x, edge_index, batch, num_graphs, mask_indices, training=True, edge_training=False)
         else:
-            z = self.encoder(x, edge_index, batch, training=False)
+            z = self.encoder(x, edge_index, batch, num_graphs, training=False, edge_training=False)
         
         # 배치 처리
         z_list, edge_index_list, max_nodes_in_batch = BatchUtils.process_batch(z, edge_index, batch, num_graphs)
@@ -782,7 +835,10 @@ class GRAPH_AUTOENCODER(nn.Module):
         # z_ = self.encoder(x_recon, edge_index, batch, training=False)
         
         if training and mask_indices is not None:
-            return cls_output, x_recon, masked_outputs
+            if edge_training:
+                return cls_output, x_recon, masked_outputs, adj_recon_list
+            else:
+                return cls_output, x_recon, masked_outputs
         return cls_output, x_recon
 
 
@@ -826,7 +882,7 @@ def run(dataset_name, random_seed, dataset_AN, trial, device=device):
     max_node_label = meta['max_node_label']
     
     # BERT 모델 저장 경로
-    bert_save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/BERT_model/pretrained_bert_{dataset_name}_fold{trial}_nhead{n_head}_seed{random_seed}_BERT_epochs{BERT_epochs}_linear{hidden_dims[-1]}_transbatchfirst_try6.pth'
+    bert_save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/BERT_model/pretrained_bert_{dataset_name}_fold{trial}_nhead{n_head}_seed{random_seed}_BERT_epochs{BERT_epochs}_gcn{hidden_dims[-1]}_edge_train_batch_first_try6.pth'
     
     model = GRAPH_AUTOENCODER(
         num_features=num_features, 
@@ -860,14 +916,23 @@ def run(dataset_name, random_seed, dataset_AN, trial, device=device):
         # bert_scheduler = ReduceLROnPlateau(bert_optimizer, mode='min', factor=factor, patience=patience)
     
         for epoch in range(1, BERT_epochs+1):
-            train_loss, num_sample = train_bert_embedding(
+            train_loss, num_sample, mask_indices = train_bert_embedding(
                 model, train_loader, bert_optimizer, device
             )
             # bert_scheduler.step(train_loss)
             
             if epoch % log_interval == 0:
                 print(f'BERT Training Epoch {epoch}: Loss = {train_loss:.4f}')
-                
+        
+        for epoch in range(1, BERT_epochs+1):
+            train_adj_loss, num_sample_ = train_bert_embedding_(
+                model, train_loader, bert_optimizer, mask_indices, device
+            )
+            # bert_scheduler.step(train_loss)
+            
+            if epoch % log_interval == 0:
+                print(f'BERT Edge Training Epoch {epoch}: Loss = {train_adj_loss:.4f}')
+                      
         # 학습된 BERT 저장
         print("Saving pretrained BERT...")
         torch.save(model.encoder.state_dict(), bert_save_path)
