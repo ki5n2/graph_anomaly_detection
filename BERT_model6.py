@@ -94,6 +94,9 @@ def train_bert_embedding_(model, train_loader, bert_optimizer, mask_indices, dev
         
         adj = adj_original(edge_index, batch, max_nodes)
         
+        # 마스크 생성
+        mask_indices = torch.rand(x.size(0), device=device) < 0.15  # 15% 노드 마스킹
+
         # BERT 인코딩 및 마스크 토큰 예측만 수행
         _, _, masked_outputs, adj_recon_list = model(
             x, edge_index, batch, num_graphs, mask_indices, training=True, edge_training=True
