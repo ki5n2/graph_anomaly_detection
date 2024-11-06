@@ -796,7 +796,7 @@ def run(dataset_name, random_seed, dataset_AN, trial, device=device):
     max_node_label = meta['max_node_label']
     
     # BERT 모델 저장 경로
-    bert_save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/BERT_model/pretrained_bert_{dataset_name}_fold{trial}_nhead{n_head}_seed{random_seed}_BERT_epochs{BERT_epochs}_linear{hidden_dims[-1]}_transbatchfirst_try6.pth'
+    bert_save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/BERT_model/Class/pretrained_bert_{dataset_name}_fold{trial}_nhead{n_head}_seed{random_seed}_BERT_epochs{BERT_epochs}_linear{hidden_dims[-1]}_transbatchfirst_try6.pth'
     
     model = GRAPH_AUTOENCODER(
         num_features=num_features, 

@@ -270,7 +270,7 @@ parser.add_argument("--assets-root", type=str, default="./assets")
 parser.add_argument("--n-head", type=int, default=2)
 parser.add_argument("--n-layer", type=int, default=2)
 parser.add_argument("--BERT-epochs", type=int, default=100)
-parser.add_argument("--epochs", type=int, default=300)
+parser.add_argument("--epochs", type=int, default=5)
 parser.add_argument("--patience", type=int, default=5)
 parser.add_argument("--n-cluster", type=int, default=3)
 parser.add_argument("--step-size", type=int, default=20)
@@ -882,7 +882,7 @@ def run(dataset_name, random_seed, dataset_AN, trial, device=device):
     max_node_label = meta['max_node_label']
     
     # BERT 모델 저장 경로
-    bert_save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/BERT_model/pretrained_bert_{dataset_name}_fold{trial}_nhead{n_head}_seed{random_seed}_BERT_epochs{BERT_epochs}_gcn{hidden_dims[-1]}_edge_train_batch_first_try6.pth'
+    bert_save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/BERT_model/Class/pretrained_bert_{dataset_name}_fold{trial}_nhead{n_head}_seed{random_seed}_BERT_epochs{BERT_epochs}_gcn{hidden_dims[-1]}_edge_train_batch_first_try6.pth'
     
     model = GRAPH_AUTOENCODER(
         num_features=num_features, 
