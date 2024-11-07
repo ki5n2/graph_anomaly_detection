@@ -261,8 +261,8 @@ parser.add_argument("--assets-root", type=str, default="./assets")
 
 parser.add_argument("--n-head", type=int, default=2)
 parser.add_argument("--n-layer", type=int, default=2)
-parser.add_argument("--BERT-epochs", type=int, default=5)
-parser.add_argument("--epochs", type=int, default=5)
+parser.add_argument("--BERT-epochs", type=int, default=100)
+parser.add_argument("--epochs", type=int, default=100)
 parser.add_argument("--patience", type=int, default=5)
 parser.add_argument("--n-cluster", type=int, default=3)
 parser.add_argument("--step-size", type=int, default=20)
@@ -918,5 +918,6 @@ if __name__ == '__main__':
         
     print('[FINAL RESULTS] ' + ad_auc)
     
+
 
 # %%
