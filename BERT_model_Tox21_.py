@@ -128,22 +128,31 @@ def train(model, train_loader, recon_optimizer, max_nodes, device):
         data = data.to(device)
         x, edge_index, batch, num_graphs = data.x, data.edge_index, data.batch, data.num_graphs
         
-        train_cls_outputs, x_recon = model(x, edge_index, batch, num_graphs)
+        train_cls_outputs, x_recon, adj_recon_list_ = model(x, edge_index, batch, num_graphs)
+        
+        adj = adj_original(edge_index, batch, max_nodes)
         
         loss = 0
+        loss_node = 0
+        loss_edge = 0
+        
         start_node = 0
         for i in range(num_graphs):
             num_nodes = (batch == i).sum().item()
             end_node = start_node + num_nodes
 
             node_loss = torch.norm(x[start_node:end_node] - x_recon[start_node:end_node], p='fro')**2 / num_nodes
+            adj_loss = torch.norm(adj[i] - adj_recon_list_[i], p='fro')**2 / num_nodes
             
-            loss += node_loss
-
+            loss += node_loss + adj_loss
+            loss_node += node_loss
+            loss_edge += adj_loss
+            
             start_node = end_node
         
-        print(f'train_node_loss: {loss}')
-        
+        print(f'train_node_loss: {loss_node}')
+        print(f'train_adj_loss: {loss_edge}')
+
         num_sample += num_graphs
 
         loss.backward()
@@ -170,8 +179,10 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
             data = data.to(device)
             x, edge_index, batch, num_graphs = data.x, data.edge_index, data.batch, data.num_graphs
 
-            e_cls_output, x_recon = model(x, edge_index, batch, num_graphs)
-
+            e_cls_output, x_recon, adj_recon_list_ = model(x, edge_index, batch, num_graphs)
+            
+            adj = adj_original(edge_index, batch, max_nodes)
+            
             recon_errors = []
             start_node = 0
             for i in range(num_graphs):
@@ -179,16 +190,18 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
                 end_node = start_node + num_nodes
                 
                 node_loss = torch.norm(x[start_node:end_node] - x_recon[start_node:end_node], p='fro')**2 / num_nodes
+                adj_loss = torch.norm(adj[i] - adj_recon_list_[i], p='fro')**2 / num_nodes
                 
                 # cls_vec = e_cls_output[i].cpu().numpy()  # [hidden_dim]
                 cls_vec = e_cls_output[i].detach().cpu().numpy()  # [hidden_dim]
                 distances = cdist([cls_vec], cluster_centers, metric='euclidean')  # [1, n_clusters]
                 min_distance = distances.min()
 
-                recon_error = (node_loss.item() * alpha) + (min_distance.item() * gamma)              
+                recon_error = (node_loss.item() * alpha) + (adj_loss.item() * beta) + (min_distance.item() * gamma)              
                 recon_errors.append(recon_error)
                 
                 print(f'test_node_loss: {node_loss.item() * alpha}')
+                print(f'test_adj_loss: {adj_loss.item() * beta}')
                 print(f'test_min_distance: {min_distance.item() * gamma}')
 
                 if data.y[i].item() == 0:
@@ -261,18 +274,18 @@ parser.add_argument("--assets-root", type=str, default="./assets")
 
 parser.add_argument("--n-head", type=int, default=2)
 parser.add_argument("--n-layer", type=int, default=2)
-parser.add_argument("--BERT-epochs", type=int, default=100)
-parser.add_argument("--epochs", type=int, default=100)
+parser.add_argument("--BERT-epochs", type=int, default=1)
+parser.add_argument("--epochs", type=int, default=30)
 parser.add_argument("--patience", type=int, default=5)
 parser.add_argument("--n-cluster", type=int, default=3)
 parser.add_argument("--step-size", type=int, default=20)
 parser.add_argument("--n-repeat-val", type=int, default=1)
 parser.add_argument("--random-seed", type=int, default=1)
-parser.add_argument("--batch-size", type=int, default=1024)
-parser.add_argument("--log-interval", type=int, default=5)
+parser.add_argument("--batch-size", type=int, default=300)
+parser.add_argument("--log-interval", type=int, default=1)
 parser.add_argument("--n-test-anomaly", type=int, default=400)
 parser.add_argument("--test-batch-size", type=int, default=128)
-parser.add_argument("--hidden-dims", nargs='+', type=int, default=[128])
+parser.add_argument("--hidden-dims", nargs='+', type=int, default=[256])
 
 parser.add_argument("--factor", type=float, default=0.5)
 parser.add_argument("--test-size", type=float, default=0.25)
@@ -281,7 +294,7 @@ parser.add_argument("--weight-decay", type=float, default=0.0001)
 parser.add_argument("--learning-rate", type=float, default=0.0001)
 
 parser.add_argument("--alpha", type=float, default=10.0)
-parser.add_argument("--beta", type=float, default=0.05)
+parser.add_argument("--beta", type=float, default=0.5)
 parser.add_argument("--gamma", type=float, default=0.1)
 parser.add_argument("--node-theta", type=float, default=0.03)
 parser.add_argument("--adj-theta", type=float, default=0.01)
@@ -442,8 +455,8 @@ class BilinearEdgeDecoder(nn.Module):
 class BertEncoder(nn.Module):
     def __init__(self, num_features, hidden_dims, d_model, nhead, num_layers, max_nodes, dropout_rate=0.1):
         super().__init__()
-        # self.gcn_encoder = Encoder(num_features, hidden_dims, dropout_rate)
-        self.input_projection = nn.Linear(num_features, hidden_dims[-1])
+        self.gcn_encoder= Encoder(num_features, hidden_dims, dropout_rate)
+        # self.input_projection = nn.Linear(num_features, hidden_dims[-1])
         self.positional_encoding = GraphBertPositionalEncoding(hidden_dims[-1], max_nodes)
         encoder_layer = nn.TransformerEncoderLayer(
             hidden_dims[-1], nhead, hidden_dims[-1] * 4, dropout_rate, activation='gelu', batch_first = True
@@ -462,8 +475,8 @@ class BertEncoder(nn.Module):
         self.apply(self._init_weights)
 
     def forward(self, x, edge_index, batch, num_graphs, mask_indices=None, training=True, edge_training=False):
-        # h = self.gcn_encoder(x, edge_index)
-        h = self.input_projection(x)
+        h = self.gcn_encoder(x, edge_index)
+        # h = self.input_projection(x)
         
         # 배치 처리
         z_list, edge_index_list, max_nodes_in_batch = BatchUtils.process_batch(h, edge_index, batch)
@@ -486,7 +499,7 @@ class BertEncoder(nn.Module):
             mask_positions = torch.zeros_like(padding_mask)
             start_idx = 0
             for i in range(len(z_list)):
-                num_nodes = z_list[i].size(0)
+                num_nodes = z_list[i].shape[0]
                 graph_mask_indices = mask_indices[start_idx:start_idx + num_nodes]
                 mask_positions[i, 1:num_nodes+1] = graph_mask_indices
                 node_indices = mask_positions[i].nonzero().squeeze(-1)
@@ -741,6 +754,7 @@ class GRAPH_AUTOENCODER(nn.Module):
             dropout=dropout_rate
         )
         self.feature_decoder = FeatureDecoder(hidden_dims[-1], num_features)
+        self.edge_decoder = BilinearEdgeDecoder(max_nodes)
         self.u_mlp = nn.Sequential(
             nn.Linear(hidden_dims[-1], hidden_dims[-1]),
             nn.ReLU(),
@@ -775,13 +789,23 @@ class GRAPH_AUTOENCODER(nn.Module):
         # 디코딩
         u_prime = self.u_mlp(u)
         x_recon = self.feature_decoder(u_prime)
-         
+        
+        adj_recon_list_ = []
+        idx = 0
+        for i in range(num_graphs):
+            num_nodes = z_list[i].size(0)
+            z_graph = u_prime[idx:idx + num_nodes]
+            # z_graph = node_embeddings[idx:idx + num_nodes]
+            adj_recon = self.edge_decoder(z_graph)
+            adj_recon_list_.append(adj_recon)
+            idx += num_nodes
+                
         if training and mask_indices is not None:
             if edge_training:
                 return cls_output, x_recon, masked_outputs, adj_recon_list
             else:
                 return cls_output, x_recon, masked_outputs
-        return cls_output, x_recon
+        return cls_output, x_recon, adj_recon_list_
 
 
 def perform_clustering(train_cls_outputs, random_seed, n_clusters):
@@ -824,7 +848,7 @@ def run(dataset_name, random_seed, device=device):
     max_nodes = meta['max_nodes']
 
     # BERT 모델 저장 경로
-    bert_save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/BERT_model/Tox21/pretrained_bert_{dataset_name}_nhead{n_head}_seed{random_seed}_BERT_epochs{BERT_epochs}_linear{hidden_dims[-1]}_try7.pth'
+    bert_save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/BERT_model/Tox21/pretrained_bert_{dataset_name}_nhead{n_head}_seed{random_seed}_BERT_epochs{BERT_epochs}_allgcn{hidden_dims[-1]}_try7.pth'
     
     model = GRAPH_AUTOENCODER(
         num_features=num_features, 
@@ -916,8 +940,7 @@ if __name__ == '__main__':
         
     print(f"seed {random_seed} finished in {fold_duration:.2f} seconds.")
         
-    print('[FINAL RESULTS] ' + ad_auc)
+    print('[FINAL RESULTS] ' + str(ad_auc))
     
-
 
 # %%
