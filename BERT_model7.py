@@ -7,6 +7,7 @@ print('이번 BERT 모델 7은 AIDS, BZR, COX2, DHFR에 대한 실험 파일입�
 import os
 import re
 import sys
+import json
 import math
 import time
 import wandb
@@ -233,6 +234,97 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
 
 
 #%%
+def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
+    model.eval()
+    total_loss_ = 0
+    total_loss_anomaly_ = 0
+    total_loss_mean = 0
+    total_loss_anomaly_mean = 0
+    all_labels = []
+    all_scores = []
+    reconstruction_errors = []  # 새로 추가
+    clustering_distances = []   # 새로 추가
+    
+    with torch.no_grad():
+        for data in test_loader:
+            data = data.to(device)
+            x, edge_index, batch, num_graphs, node_label = data.x, data.edge_index, data.batch, data.num_graphs, data.node_label
+            e_cls_output, x_recon = model(x, edge_index, batch, num_graphs)
+            
+            recon_errors = []
+            start_node = 0
+            
+            for i in range(num_graphs):
+                num_nodes = (batch == i).sum().item()
+                end_node = start_node + num_nodes
+                
+                # Reconstruction error 계산
+                node_loss = torch.norm(x[start_node:end_node] - x_recon[start_node:end_node], p='fro')**2 / num_nodes
+                node_loss_scaled = node_loss.item() * alpha
+                
+                # Clustering distance 계산
+                cls_vec = e_cls_output[i].detach().cpu().numpy()
+                distances = cdist([cls_vec], cluster_centers, metric='euclidean')
+                min_distance = distances.min()
+                min_distance_scaled = min_distance.item() * gamma
+                
+                # 각각의 에러 저장
+                reconstruction_errors.append({
+                    'reconstruction': node_loss_scaled,
+                    'clustering': min_distance_scaled,
+                    'is_anomaly': data.y[i].item() == 1
+                })
+                
+                recon_error = node_loss_scaled + min_distance_scaled
+                recon_errors.append(recon_error)
+                
+                if data.y[i].item() == 0:
+                    total_loss_ += recon_error
+                else:
+                    total_loss_anomaly_ += recon_error
+                    
+                start_node = end_node
+                
+            total_loss = total_loss_ / sum(data.y == 0)
+            total_loss_anomaly = total_loss_anomaly_ / sum(data.y == 1)
+            total_loss_mean += total_loss
+            total_loss_anomaly_mean += total_loss_anomaly
+            
+            all_scores.extend(recon_errors)
+            all_labels.extend(data.y.cpu().numpy())
+    
+    # 시각화를 위한 데이터 변환
+    visualization_data = {
+        'normal': [
+            {'reconstruction': error['reconstruction'], 'clustering': error['clustering']}
+            for error in reconstruction_errors if not error['is_anomaly']
+        ],
+        'anomaly': [
+            {'reconstruction': error['reconstruction'], 'clustering': error['clustering']}
+            for error in reconstruction_errors if error['is_anomaly']
+        ]
+    }
+    all_labels = np.array(all_labels)
+    all_scores = np.array(all_scores)
+
+    # Compute metrics
+    fpr, tpr, thresholds = roc_curve(all_labels, all_scores)
+    auroc = auc(fpr, tpr)
+    precision, recall, _ = precision_recall_curve(all_labels, all_scores)
+    auprc = auc(recall, precision)
+
+    optimal_idx = np.argmax(tpr - fpr)
+    optimal_threshold = thresholds[optimal_idx]
+    pred_labels = (all_scores > optimal_threshold).astype(int)
+
+    precision = precision_score(all_labels, pred_labels)
+    recall = recall_score(all_labels, pred_labels)
+    f1 = f1_score(all_labels, pred_labels)
+
+    return auroc, auprc, precision, recall, f1, total_loss_mean / len(test_loader), total_loss_anomaly_mean / len(test_loader), visualization_data
+
+
+#%%
 '''ARGPARSER'''
 parser = argparse.ArgumentParser()
 
@@ -250,7 +342,7 @@ parser.add_argument("--step-size", type=int, default=20)
 parser.add_argument("--n-cross-val", type=int, default=5)
 parser.add_argument("--random-seed", type=int, default=1)
 parser.add_argument("--batch-size", type=int, default=300)
-parser.add_argument("--log-interval", type=int, default=3)
+parser.add_argument("--log-interval", type=int, default=5)
 parser.add_argument("--n-test-anomaly", type=int, default=400)
 parser.add_argument("--test-batch-size", type=int, default=128)
 parser.add_argument("--hidden-dims", nargs='+', type=int, default=[256])
@@ -867,17 +959,49 @@ def run(dataset_name, random_seed, dataset_AN, trial, device=device):
             # cluster_centers = cluster_centers.detach().cpu().numpy()
             cluster_centers = cluster_centers.reshape(-1, hidden_dims[-1])
 
-            auroc, auprc, precision, recall, f1, test_loss, test_loss_anomaly = evaluate_model(model, test_loader, max_nodes, cluster_centers, device)
+            auroc, auprc, precision, recall, f1, test_loss, test_loss_anomaly, visualization_data = evaluate_model(model, test_loader, max_nodes, cluster_centers, device)
             # scheduler.step(auroc)
+            
+            # 시각화 데이터를 JSON으로 저장하거나 웹 애플리케이션으로 전달
+            save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/error_distribution_epoch_{epoch}.json'
+            with open(save_path, 'w') as f:
+                json.dump(visualization_data, f)
             
             all_results.append((auroc, auprc, precision, recall, f1, test_loss, test_loss_anomaly))
             print(f'Epoch {epoch+1}: Training Loss = {train_loss:.4f}, Validation loss = {test_loss:.4f}, Validation loss anomaly = {test_loss_anomaly:.4f}, Validation AUC = {auroc:.4f}, Validation AUPRC = {auprc:.4f}, Precision = {precision:.4f}, Recall = {recall:.4f}, F1 = {f1:.4f}')
             
             info_test = 'AD_AUC:{:.4f}, AD_AUPRC:{:.4f}, Test_Loss:{:.4f}, Test_Loss_Anomaly:{:.4f}'.format(auroc, auprc, test_loss, test_loss_anomaly)
-
             print(info_train + '   ' + info_test)
 
     return auroc
+
+
+#%%
+base_dir = '/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot'
+
+with open(base_dir + 'error_distribution.json', 'r') as f:
+    data = json.load(f)
+
+# 데이터 추출
+normal_recon = [point['reconstruction'] for point in data['normal']]
+normal_cluster = [point['clustering'] for point in data['normal']]
+anomaly_recon = [point['reconstruction'] for point in data['anomaly']]
+anomaly_cluster = [point['clustering'] for point in data['anomaly']]
+
+# 산점도 그리기
+plt.figure(figsize=(10, 6))
+plt.scatter(normal_recon, normal_cluster, c='blue', label='Normal', alpha=0.6)
+plt.scatter(anomaly_recon, anomaly_cluster, c='red', label='Anomaly', alpha=0.6)
+
+plt.xlabel('Reconstruction Error (node_loss * alpha)')
+plt.ylabel('Clustering Distance (min_distance * gamma)')
+plt.title('Error Distribution')
+plt.legend()
+plt.grid(True)
+
+# 저장하거나 보여주기
+plt.savefig('/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/error_distribution_plot.png')  # 파일로 저장
+plt.show()  # 직접 보기
 
 
 #%%
@@ -907,6 +1031,7 @@ if __name__ == '__main__':
     print(len(ad_aucs))
     print('[FINAL RESULTS] ' + results)
     print(f"Total execution time: {total_time:.2f} seconds")
+
 
 
 # %%
