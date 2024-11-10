@@ -74,46 +74,45 @@ def train_bert_embedding(model, train_loader, bert_optimizer, device):
     return total_loss / len(train_loader), num_sample, mask_indices
 
 
-
 #%%
-def train_bert_embedding_(model, train_loader, bert_optimizer, mask_indices, device):
-    model.train()
-    total_loss = 0
-    num_sample = 0
+# def train_bert_embedding_(model, train_loader, bert_optimizer, mask_indices, device):
+#     model.train()
+#     total_loss = 0
+#     num_sample = 0
     
-    for data in train_loader:
-        bert_optimizer.zero_grad()
-        data = data.to(device)
-        x, edge_index, batch, num_graphs = data.x, data.edge_index, data.batch, data.num_graphs
+#     for data in train_loader:
+#         bert_optimizer.zero_grad()
+#         data = data.to(device)
+#         x, edge_index, batch, num_graphs = data.x, data.edge_index, data.batch, data.num_graphs
         
-        adj = adj_original(edge_index, batch, max_nodes)
-        mask_indices = torch.rand(x.size(0), device=device) < 0.15  # 15% 노드 마스킹
+#         adj = adj_original(edge_index, batch, max_nodes)
+#         mask_indices = torch.rand(x.size(0), device=device) < 0.15  # 15% 노드 마스킹
         
-        # BERT 인코딩 및 마스크 토큰 예측만 수행
-        _, _, masked_outputs, adj_recon_list = model(
-            x, edge_index, batch, num_graphs, mask_indices, training=True, edge_training=True
-        )
+#         # BERT 인코딩 및 마스크 토큰 예측만 수행
+#         _, _, masked_outputs, adj_recon_list = model(
+#             x, edge_index, batch, num_graphs, mask_indices, training=True, edge_training=True
+#         )
 
-        loss = 0
-        start_node = 0
-        for i in range(num_graphs):
-            num_nodes = (batch == i).sum().item()
-            end_node = start_node + num_nodes
+#         loss = 0
+#         start_node = 0
+#         for i in range(num_graphs):
+#             num_nodes = (batch == i).sum().item()
+#             end_node = start_node + num_nodes
             
-            adj_loss = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2 / num_nodes
-            adj_loss = adj_loss / 20
-            loss += adj_loss
+#             adj_loss = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2 / num_nodes
+#             adj_loss = adj_loss / 20
+#             loss += adj_loss
             
-            start_node = end_node
+#             start_node = end_node
             
-        print(f'edge_loss:{loss}')
+#         print(f'edge_loss:{loss}')
         
-        loss.backward()
-        bert_optimizer.step()
-        total_loss += loss.item()
-        num_sample += num_graphs
+#         loss.backward()
+#         bert_optimizer.step()
+#         total_loss += loss.item()
+#         num_sample += num_graphs
     
-    return total_loss / len(train_loader), num_sample
+#     return total_loss / len(train_loader), num_sample
 
 
 #%%
@@ -274,8 +273,8 @@ parser.add_argument("--assets-root", type=str, default="./assets")
 
 parser.add_argument("--n-head", type=int, default=2)
 parser.add_argument("--n-layer", type=int, default=2)
-parser.add_argument("--BERT-epochs", type=int, default=1)
-parser.add_argument("--epochs", type=int, default=30)
+parser.add_argument("--BERT-epochs", type=int, default=10)
+parser.add_argument("--epochs", type=int, default=50)
 parser.add_argument("--patience", type=int, default=5)
 parser.add_argument("--n-cluster", type=int, default=3)
 parser.add_argument("--step-size", type=int, default=20)
@@ -887,13 +886,13 @@ def run(dataset_name, random_seed, device=device):
             if epoch % log_interval == 0:
                 print(f'BERT Training Epoch {epoch}: Loss = {train_loss:.4f}')
         
-        for epoch in range(1, BERT_epochs+1):
-            train_adj_loss, num_sample_ = train_bert_embedding_(
-                model, train_loader, bert_optimizer, mask_indices, device
-            )
+        # for epoch in range(1, BERT_epochs+1):
+        #     train_adj_loss, num_sample_ = train_bert_embedding_(
+        #         model, train_loader, bert_optimizer, mask_indices, device
+        #     )
             
-            if epoch % log_interval == 0:
-                print(f'BERT Edge Training Epoch {epoch}: Loss = {train_adj_loss:.4f}')
+        #     if epoch % log_interval == 0:
+        #         print(f'BERT Edge Training Epoch {epoch}: Loss = {train_adj_loss:.4f}')
                 
         # 학습된 BERT 저장
         print("Saving pretrained BERT...")
