@@ -745,7 +745,7 @@ class GRAPH_AUTOENCODER(nn.Module):
         u_prime = self.u_mlp(u)
         x_recon = self.feature_decoder(u_prime)
         
-        if training and mask_indices is not None:
+        if training:
             if edge_training:
                 return cls_output, x_recon, adj_recon_list
             else:
