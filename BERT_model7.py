@@ -240,17 +240,17 @@ parser.add_argument("--dataset-name", type=str, default='COX2')
 parser.add_argument("--data-root", type=str, default='./dataset')
 parser.add_argument("--assets-root", type=str, default="./assets")
 
-parser.add_argument("--n-head", type=int, default=2)
-parser.add_argument("--n-layer", type=int, default=2)
-parser.add_argument("--BERT-epochs", type=int, default=5)
-parser.add_argument("--epochs", type=int, default=5)
+parser.add_argument("--n-head", type=int, default=4)
+parser.add_argument("--n-layer", type=int, default=4)
+parser.add_argument("--BERT-epochs", type=int, default=100)
+parser.add_argument("--epochs", type=int, default=200)
 parser.add_argument("--patience", type=int, default=5)
 parser.add_argument("--n-cluster", type=int, default=3)
 parser.add_argument("--step-size", type=int, default=20)
 parser.add_argument("--n-cross-val", type=int, default=5)
 parser.add_argument("--random-seed", type=int, default=1)
 parser.add_argument("--batch-size", type=int, default=300)
-parser.add_argument("--log-interval", type=int, default=5)
+parser.add_argument("--log-interval", type=int, default=3)
 parser.add_argument("--n-test-anomaly", type=int, default=400)
 parser.add_argument("--test-batch-size", type=int, default=128)
 parser.add_argument("--hidden-dims", nargs='+', type=int, default=[256])
@@ -686,6 +686,11 @@ class TransformerEncoder(nn.Module):
         return output
     
 
+def perform_clustering(train_cls_outputs, random_seed, n_clusters):
+    cls_outputs_np = train_cls_outputs.detach().cpu().numpy()
+    kmeans = KMeans(n_clusters=n_clusters, random_state=random_seed, n_init="auto").fit(cls_outputs_np)
+    return kmeans, kmeans.cluster_centers_
+            
 #%%
 # GRAPH_AUTOENCODER 클래스 수정
 class GRAPH_AUTOENCODER(nn.Module):
@@ -717,7 +722,7 @@ class GRAPH_AUTOENCODER(nn.Module):
         )
         self.cls_token = nn.Parameter(torch.randn(1, 1, hidden_dims[-1]))
 
-    def forward(self, x, edge_index, batch, num_graphs, mask_indices=None, training=True, edge_training=False):
+    def forward(self, x, edge_index, batch, num_graphs, mask_indices=None, training=False, edge_training=False):
         # BERT 인코딩
         if training:
             if edge_training:
@@ -751,13 +756,7 @@ class GRAPH_AUTOENCODER(nn.Module):
             else:
                 return cls_output, x_recon, masked_outputs
         return cls_output, x_recon
-
-
-def perform_clustering(train_cls_outputs, random_seed, n_clusters):
-    cls_outputs_np = train_cls_outputs.detach().cpu().numpy()
-    kmeans = KMeans(n_clusters=n_clusters, random_state=random_seed, n_init="auto").fit(cls_outputs_np)
-    return kmeans, kmeans.cluster_centers_
-            
+    
 
 #%%
 '''DATASETS'''
