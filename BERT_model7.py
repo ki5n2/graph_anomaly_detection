@@ -126,6 +126,8 @@ def train_bert_embedding_(model, train_loader, bert_optimizer, device):
 def train(model, train_loader, recon_optimizer, max_nodes, device):
     model.train()
     total_loss = 0
+    total_recon_loss = 0
+    total_cls_loss = 0
     num_sample = 0
     
     for data in train_loader:
@@ -135,7 +137,7 @@ def train(model, train_loader, recon_optimizer, max_nodes, device):
         
         train_cls_outputs, x_recon = model(x, edge_index, batch, num_graphs)
         
-        loss = 0
+        recon_loss = 0
         start_node = 0
         for i in range(num_graphs):
             num_nodes = (batch == i).sum().item()
@@ -143,19 +145,46 @@ def train(model, train_loader, recon_optimizer, max_nodes, device):
 
             node_loss = torch.norm(x[start_node:end_node] - x_recon[start_node:end_node], p='fro')**2 / num_nodes
             
-            loss += node_loss
+            recon_loss += node_loss
 
             start_node = end_node
-        
-        print(f'train_node_loss: {loss}')
-        
+                
+        # CLS Similarity Loss
+        if num_graphs > 1:  # 배치에 2개 이상의 그래프가 있을 때만 계산
+            # 1. Pairwise Distance Matrix 계산
+            cls_distances = torch.cdist(train_cls_outputs, train_cls_outputs, p=2)  # [num_graphs, num_graphs]
+            
+            # 2. 대각선 요소 제외 (자기 자신과의 거리)
+            mask = ~torch.eye(num_graphs, dtype=bool, device=device)
+            cls_distances = cls_distances[mask]
+            
+            # 3. 평균 거리 계산
+            cls_loss = cls_distances.mean()
+        else:
+            cls_loss = torch.tensor(0.0, device=device)
+                
+        # Total Loss (alpha는 CLS 손실의 가중치)
+        alpha = 1.0  # 이 값은 조정 가능
+        loss = recon_loss + alpha * cls_loss
+            
         num_sample += num_graphs
-
         loss.backward()
         recon_optimizer.step()
+        
         total_loss += loss.item()
+        total_recon_loss += recon_loss.item()
+        total_cls_loss += cls_loss.item()
+        
+        print(f'train_recon_loss: {recon_loss.item():.4f}, train_cls_loss: {cls_loss.item():.4f}')
 
-    return total_loss / len(train_loader), num_sample, train_cls_outputs.detach().cpu()
+    avg_loss = total_loss / len(train_loader)
+    avg_recon_loss = total_recon_loss / len(train_loader)
+    avg_cls_loss = total_cls_loss / len(train_loader)
+    
+    print(f'Average reconstruction loss: {avg_recon_loss:.4f}')
+    print(f'Average CLS similarity loss: {avg_cls_loss:.4f}')        
+        
+    return avg_loss, num_sample, train_cls_outputs.detach().cpu()
 
 
 #%%
@@ -309,9 +338,9 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
                 })
                 
                 # 전체 에러는 정규화된 값들의 평균으로 계산
-                total_error = (normalized_node_loss + normalized_cluster_dist) / 2
-                print(f'normalized node loss: {normalized_node_loss/2}')
-                print(f'normalized cluster dist: {normalized_cluster_dist/2}')
+                total_error = (normalized_node_loss + normalized_cluster_dist) * 10
+                print(f'normalized node loss: {normalized_node_loss * 10}')
+                print(f'normalized cluster dist: {normalized_cluster_dist * 10}')
                 recon_errors.append(total_error)
                 
                 if data.y[i].item() == 0:
@@ -338,9 +367,6 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
         ]
     }
     
-    total_loss_mean = total_loss_ / sum(all_labels == 0)
-    total_loss_anomaly_mean = total_loss_anomaly_ / sum(all_labels == 1)
-    
     # 메트릭 계산
     all_labels = np.array(all_labels)
     all_scores = np.array(all_scores)
@@ -359,6 +385,9 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
     recall = recall_score(all_labels, pred_labels)
     f1 = f1_score(all_labels, pred_labels)
     
+    total_loss_mean = total_loss_ / sum(all_labels == 0)
+    total_loss_anomaly_mean = total_loss_anomaly_ / sum(all_labels == 1)
+
     return auroc, auprc, precision, recall, f1, total_loss_mean, total_loss_anomaly_mean, visualization_data
 
 
@@ -373,7 +402,7 @@ parser.add_argument("--assets-root", type=str, default="./assets")
 parser.add_argument("--n-head", type=int, default=2)
 parser.add_argument("--n-layer", type=int, default=2)
 parser.add_argument("--BERT-epochs", type=int, default=100)
-parser.add_argument("--epochs", type=int, default=100)
+parser.add_argument("--epochs", type=int, default=200)
 parser.add_argument("--patience", type=int, default=5)
 parser.add_argument("--n-cluster", type=int, default=3)
 parser.add_argument("--step-size", type=int, default=20)
@@ -821,7 +850,7 @@ def perform_clustering(train_cls_outputs, random_seed, n_clusters):
     kmeans = KMeans(n_clusters=n_clusters, random_state=random_seed, n_init="auto").fit(cls_outputs_np)
     return kmeans, kmeans.cluster_centers_
             
-            
+
 #%%
 # GRAPH_AUTOENCODER 클래스 수정
 class GRAPH_AUTOENCODER(nn.Module):
