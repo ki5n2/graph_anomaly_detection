@@ -1,4 +1,3 @@
 BERT_model/
-error_distribution_plot/json
-error_distribution_plot/plot
+error_distribution_plot
 .vscode
