@@ -363,12 +363,12 @@ parser.add_argument("--dataset-name", type=str, default='COX2')
 parser.add_argument("--data-root", type=str, default='./dataset')
 parser.add_argument("--assets-root", type=str, default="./assets")
 
-parser.add_argument("--n-head-BERT", type=int, default=4)
-parser.add_argument("--n-layer-BERT", type=int, default=4)
+parser.add_argument("--n-head-BERT", type=int, default=8)
+parser.add_argument("--n-layer-BERT", type=int, default=8)
 parser.add_argument("--n-head", type=int, default=2)
 parser.add_argument("--n-layer", type=int, default=2)
 parser.add_argument("--BERT-epochs", type=int, default=100)
-parser.add_argument("--epochs", type=int, default=300)
+parser.add_argument("--epochs", type=int, default=100)
 parser.add_argument("--patience", type=int, default=5)
 parser.add_argument("--n-cluster", type=int, default=3)
 parser.add_argument("--step-size", type=int, default=20)
@@ -548,7 +548,7 @@ class BilinearEdgeDecoder(nn.Module):
     
 #%%
 class BertEncoder(nn.Module):
-    def __init__(self, num_features, hidden_dims, d_model, nhead, num_layers, max_nodes, num_node_classes, dropout_rate=0.1):
+    def __init__(self, num_features, hidden_dims, d_model, nhead, num_layers, max_nodes, dropout_rate=0.1):
         super().__init__()
         self.gcn_encoder = Encoder(num_features, hidden_dims, dropout_rate)
         self.positional_encoding = GraphBertPositionalEncoding(hidden_dims[-1], max_nodes)
@@ -822,16 +822,15 @@ def perform_clustering(train_cls_outputs, random_seed, n_clusters):
 #%%
 # GRAPH_AUTOENCODER 클래스 수정
 class GRAPH_AUTOENCODER(nn.Module):
-    def __init__(self, num_features, hidden_dims, max_nodes, nhead, num_layers, num_node_labels, dropout_rate=0.1):
+    def __init__(self, num_features, hidden_dims, max_nodes, n_head_BERT, nhead, num_layers_BERT, num_layers, dropout_rate=0.1):
         super().__init__()
         self.encoder = BertEncoder(
             num_features=num_features,
             hidden_dims=hidden_dims,
             d_model=hidden_dims[-1],
-            nhead=nhead,
-            num_layers=num_layers,
+            nhead=n_head_BERT,
+            num_layers=num_layers_BERT,
             max_nodes=max_nodes,
-            num_node_classes=num_node_labels,
             dropout_rate=dropout_rate
         )
         self.transformer_d = TransformerEncoder(
@@ -929,9 +928,10 @@ def run(dataset_name, random_seed, dataset_AN, trial, device=device, epoch_resul
         num_features=num_features, 
         hidden_dims=hidden_dims, 
         max_nodes=max_nodes,
+        n_head_BERT=n_head_BERT,
         nhead=n_head,
+        num_layers_BERT=n_layer_BERT,
         num_layers=n_layer,
-        num_node_labels=max_node_label,
         dropout_rate=dropout_rate
     ).to(device)
     
@@ -1093,7 +1093,7 @@ if __name__ == '__main__':
 #%%
 base_dir = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/json/{dataset_name}/'
 
-trial = 1
+trial = 0
 for epoch in range(1, epochs + 1):    
     if epoch % log_interval == 0:
         with open(base_dir + f'error_distribution_epoch_{epoch}_fold_{trial}.json', 'r') as f:
