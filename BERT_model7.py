@@ -59,9 +59,8 @@ def train_bert_embedding(model, train_loader, bert_optimizer, device):
     for data in train_loader:
         bert_optimizer.zero_grad()
         data = data.to(device)
-        x, edge_index, batch, num_graphs, node_label = data.x, data.edge_index, data.batch, data.num_graphs, data.node_label
-        node_label = torch.round(node_label).long()
-
+        x, edge_index, batch, num_graphs = data.x, data.edge_index, data.batch, data.num_graphs
+        
         # 마스크 생성
         mask_indices = torch.rand(x.size(0), device=device) < 0.15  # 15% 노드 마스킹
         
@@ -91,7 +90,7 @@ def train_bert_embedding_(model, train_loader, bert_optimizer, device):
     for data in train_loader:
         bert_optimizer.zero_grad()
         data = data.to(device)
-        x, edge_index, batch, num_graphs, node_label = data.x, data.edge_index, data.batch, data.num_graphs, data.node_label
+        x, edge_index, batch, num_graphs = data.x, data.edge_index, data.batch, data.num_graphs
         
         adj = adj_original(edge_index, batch, max_nodes)
         
@@ -132,7 +131,7 @@ def train(model, train_loader, recon_optimizer, max_nodes, device):
     for data in train_loader:
         recon_optimizer.zero_grad()
         data = data.to(device)
-        x, edge_index, batch, num_graphs, node_label = data.x, data.edge_index, data.batch, data.num_graphs, data.node_label
+        x, edge_index, batch, num_graphs = data.x, data.edge_index, data.batch, data.num_graphs
         
         train_cls_outputs, x_recon = model(x, edge_index, batch, num_graphs)
         
@@ -174,7 +173,7 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
     with torch.no_grad():
         for data in test_loader:
             data = data.to(device)
-            x, edge_index, batch, num_graphs, node_label = data.x, data.edge_index, data.batch, data.num_graphs, data.node_label
+            x, edge_index, batch, num_graphs = data.x, data.edge_index, data.batch, data.num_graphs
 
             e_cls_output, x_recon = model(x, edge_index, batch, num_graphs)
 
@@ -238,8 +237,6 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
     model.eval()
     total_loss_ = 0
     total_loss_anomaly_ = 0
-    total_loss_mean = 0
-    total_loss_anomaly_mean = 0
     all_labels = []
     all_scores = []
     reconstruction_errors = []  # 새로 추가
@@ -341,6 +338,9 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
         ]
     }
     
+    total_loss_mean = total_loss_ / sum(all_labels == 0)
+    total_loss_anomaly_mean = total_loss_anomaly_ / sum(all_labels == 1)
+    
     # 메트릭 계산
     all_labels = np.array(all_labels)
     all_scores = np.array(all_scores)
@@ -359,7 +359,7 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
     recall = recall_score(all_labels, pred_labels)
     f1 = f1_score(all_labels, pred_labels)
     
-    return auroc, auprc, precision, recall, f1, total_loss_ / sum(all_labels == 0), total_loss_anomaly_ / sum(all_labels == 1), visualization_data
+    return auroc, auprc, precision, recall, f1, total_loss_mean, total_loss_anomaly_mean, visualization_data
 
 
 #%%
@@ -926,7 +926,7 @@ def run(dataset_name, random_seed, dataset_AN, trial, device=device, epoch_resul
     max_node_label = meta['max_node_label']
     
     # BERT 모델 저장 경로
-    bert_save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/BERT_model/Class/pretrained_bert_{dataset_name}_fold{trial}_nhead{n_head}_seed{random_seed}_BERT_epochs{BERT_epochs}_gcn{hidden_dims[-1]}_edge_train_batch_first_try6.pth'
+    bert_save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/BERT_model/Class/pretrained_bert_{dataset_name}_fold{trial}_nhead{n_head}_seed{random_seed}_BERT_epochs{BERT_epochs}_gcn{hidden_dims[-1]}_edge_train_try6.pth'
     
     model = GRAPH_AUTOENCODER(
         num_features=num_features, 
@@ -984,9 +984,7 @@ def run(dataset_name, random_seed, dataset_AN, trial, device=device, epoch_resul
     # 2단계: 재구성 학습
     print("\nStage 2: Training reconstruction...")
     recon_optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-    # optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-    # scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=factor, patience=patience, verbose=True)
-
+    
     for epoch in range(1, epochs+1):
         fold_start = time.time()  # 현재 폴드 시작 시간
         train_loss, num_sample, train_cls_outputs = train(model, train_loader, recon_optimizer, max_nodes, device)
@@ -999,7 +997,6 @@ def run(dataset_name, random_seed, dataset_AN, trial, device=device, epoch_resul
 
             auroc, auprc, precision, recall, f1, test_loss, test_loss_anomaly, visualization_data = evaluate_model(model, test_loader, max_nodes, cluster_centers, device)
             
-            # 시각화 데이터를 JSON으로 저장하거나 웹 애플리케이션으로 전달
             save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/json/error_distribution_epoch_{epoch}_fold_{trial}.json'
             with open(save_path, 'w') as f:
                 json.dump(visualization_data, f)
