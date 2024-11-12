@@ -82,44 +82,117 @@ def train_bert_embedding(model, train_loader, bert_optimizer, device):
 
 
 #%%
-def train_bert_embedding_(model, train_loader, bert_optimizer, device):
-    model.train()
-    total_loss = 0
-    num_sample = 0
+# def train_bert_embedding_(model, train_loader, bert_optimizer, device):
+#     model.train()
+#     total_loss = 0
+#     num_sample = 0
     
-    for data in train_loader:
-        bert_optimizer.zero_grad()
-        data = data.to(device)
-        x, edge_index, batch, num_graphs = data.x, data.edge_index, data.batch, data.num_graphs
+#     for data in train_loader:
+#         bert_optimizer.zero_grad()
+#         data = data.to(device)
+#         x, edge_index, batch, num_graphs = data.x, data.edge_index, data.batch, data.num_graphs
         
-        adj = adj_original(edge_index, batch, max_nodes)
+#         adj = adj_original(edge_index, batch, max_nodes)
         
-        # BERT 인코딩 및 마스크 토큰 예측만 수행
-        _, _, adj_recon_list = model(
-            x, edge_index, batch, num_graphs, training=True, edge_training=True
-        )
+#         # BERT 인코딩 및 마스크 토큰 예측만 수행
+#         _, _, adj_recon_list = model(
+#             x, edge_index, batch, num_graphs, training=True, edge_training=True
+#         )
 
-        loss = 0
-        start_node = 0
-        for i in range(num_graphs):
-            num_nodes = (batch == i).sum().item()
-            end_node = start_node + num_nodes
+#         loss = 0
+#         start_node = 0
+#         for i in range(num_graphs):
+#             num_nodes = (batch == i).sum().item()
+#             end_node = start_node + num_nodes
             
-            adj_loss = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2 / num_nodes
-            adj_loss = adj_loss / 20
-            loss += adj_loss
+#             adj_loss = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2 / num_nodes
+#             adj_loss = adj_loss / 20
+#             loss += adj_loss
             
-            start_node = end_node
+#             start_node = end_node
             
-        print(f'edge_loss:{loss}')
-        # print(f'mask_label:{mask_loss_}')
+#         print(f'edge_loss:{loss}')
+#         # print(f'mask_label:{mask_loss_}')
         
-        loss.backward()
-        bert_optimizer.step()
-        total_loss += loss.item()
-        num_sample += num_graphs
+#         loss.backward()
+#         bert_optimizer.step()
+#         total_loss += loss.item()
+#         num_sample += num_graphs
     
-    return total_loss / len(train_loader), num_sample
+#     return total_loss / len(train_loader), num_sample
+
+
+# '''EVALUATION'''
+# def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
+#     model.eval()
+#     total_loss_ = 0
+#     total_loss_anomaly_ = 0
+#     total_loss_mean = 0
+#     total_loss_anomaly_mean = 0
+
+#     all_labels = []
+#     all_scores = []
+
+#     with torch.no_grad():
+#         for data in test_loader:
+#             data = data.to(device)
+#             x, edge_index, batch, num_graphs = data.x, data.edge_index, data.batch, data.num_graphs
+
+#             e_cls_output, x_recon = model(x, edge_index, batch, num_graphs)
+
+#             recon_errors = []
+#             start_node = 0
+#             for i in range(num_graphs):
+#                 num_nodes = (batch == i).sum().item()
+#                 end_node = start_node + num_nodes
+                
+#                 node_loss = torch.norm(x[start_node:end_node] - x_recon[start_node:end_node], p='fro')**2 / num_nodes
+                
+#                 # cls_vec = e_cls_output[i].cpu().numpy()  # [hidden_dim]
+#                 cls_vec = e_cls_output[i].detach().cpu().numpy()  # [hidden_dim]
+#                 distances = cdist([cls_vec], cluster_centers, metric='euclidean')  # [1, n_clusters]
+#                 min_distance = distances.min()
+
+#                 recon_error = (node_loss.item() * alpha) + (min_distance.item() * gamma)              
+#                 recon_errors.append(recon_error)
+                
+#                 print(f'test_node_loss: {node_loss.item() * alpha}')
+#                 print(f'test_min_distance: {min_distance.item() * gamma}')
+
+#                 if data.y[i].item() == 0:
+#                     total_loss_ += recon_error
+#                 else:
+#                     total_loss_anomaly_ += recon_error
+
+#                 start_node = end_node
+            
+#             total_loss = total_loss_ / sum(data.y == 0)
+#             total_loss_anomaly = total_loss_anomaly_ / sum(data.y == 1)
+            
+#             total_loss_mean += total_loss
+#             total_loss_anomaly_mean += total_loss_anomaly
+            
+#             all_scores.extend(recon_errors)
+#             all_labels.extend(data.y.cpu().numpy())
+
+#     all_labels = np.array(all_labels)
+#     all_scores = np.array(all_scores)
+
+#     # Compute metrics
+#     fpr, tpr, thresholds = roc_curve(all_labels, all_scores)
+#     auroc = auc(fpr, tpr)
+#     precision, recall, _ = precision_recall_curve(all_labels, all_scores)
+#     auprc = auc(recall, precision)
+
+#     optimal_idx = np.argmax(tpr - fpr)
+#     optimal_threshold = thresholds[optimal_idx]
+#     pred_labels = (all_scores > optimal_threshold).astype(int)
+
+#     precision = precision_score(all_labels, pred_labels)
+#     recall = recall_score(all_labels, pred_labels)
+#     f1 = f1_score(all_labels, pred_labels)
+
+#     return auroc, auprc, precision, recall, f1, total_loss_mean / len(test_loader), total_loss_anomaly_mean / len(test_loader)
 
 
 #%%
@@ -164,8 +237,9 @@ def train(model, train_loader, recon_optimizer, max_nodes, device):
             cls_loss = torch.tensor(0.0, device=device)
                 
         # Total Loss (alpha는 CLS 손실의 가중치)
-        alpha = 1.0  # 이 값은 조정 가능
-        loss = recon_loss + alpha * cls_loss
+        alpha = 10.0  # 이 값은 조정 가능
+        cls_loss = alpha * cls_loss
+        loss = recon_loss + cls_loss
             
         num_sample += num_graphs
         loss.backward()
@@ -185,80 +259,6 @@ def train(model, train_loader, recon_optimizer, max_nodes, device):
     print(f'Average CLS similarity loss: {avg_cls_loss:.4f}')        
         
     return avg_loss, num_sample, train_cls_outputs.detach().cpu()
-
-
-#%%
-'''EVALUATION'''
-def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
-    model.eval()
-    total_loss_ = 0
-    total_loss_anomaly_ = 0
-    total_loss_mean = 0
-    total_loss_anomaly_mean = 0
-
-    all_labels = []
-    all_scores = []
-
-    with torch.no_grad():
-        for data in test_loader:
-            data = data.to(device)
-            x, edge_index, batch, num_graphs = data.x, data.edge_index, data.batch, data.num_graphs
-
-            e_cls_output, x_recon = model(x, edge_index, batch, num_graphs)
-
-            recon_errors = []
-            start_node = 0
-            for i in range(num_graphs):
-                num_nodes = (batch == i).sum().item()
-                end_node = start_node + num_nodes
-                
-                node_loss = torch.norm(x[start_node:end_node] - x_recon[start_node:end_node], p='fro')**2 / num_nodes
-                
-                # cls_vec = e_cls_output[i].cpu().numpy()  # [hidden_dim]
-                cls_vec = e_cls_output[i].detach().cpu().numpy()  # [hidden_dim]
-                distances = cdist([cls_vec], cluster_centers, metric='euclidean')  # [1, n_clusters]
-                min_distance = distances.min()
-
-                recon_error = (node_loss.item() * alpha) + (min_distance.item() * gamma)              
-                recon_errors.append(recon_error)
-                
-                print(f'test_node_loss: {node_loss.item() * alpha}')
-                print(f'test_min_distance: {min_distance.item() * gamma}')
-
-                if data.y[i].item() == 0:
-                    total_loss_ += recon_error
-                else:
-                    total_loss_anomaly_ += recon_error
-
-                start_node = end_node
-            
-            total_loss = total_loss_ / sum(data.y == 0)
-            total_loss_anomaly = total_loss_anomaly_ / sum(data.y == 1)
-            
-            total_loss_mean += total_loss
-            total_loss_anomaly_mean += total_loss_anomaly
-            
-            all_scores.extend(recon_errors)
-            all_labels.extend(data.y.cpu().numpy())
-
-    all_labels = np.array(all_labels)
-    all_scores = np.array(all_scores)
-
-    # Compute metrics
-    fpr, tpr, thresholds = roc_curve(all_labels, all_scores)
-    auroc = auc(fpr, tpr)
-    precision, recall, _ = precision_recall_curve(all_labels, all_scores)
-    auprc = auc(recall, precision)
-
-    optimal_idx = np.argmax(tpr - fpr)
-    optimal_threshold = thresholds[optimal_idx]
-    pred_labels = (all_scores > optimal_threshold).astype(int)
-
-    precision = precision_score(all_labels, pred_labels)
-    recall = recall_score(all_labels, pred_labels)
-    f1 = f1_score(all_labels, pred_labels)
-
-    return auroc, auprc, precision, recall, f1, total_loss_mean / len(test_loader), total_loss_anomaly_mean / len(test_loader)
 
 
 #%%
@@ -359,7 +359,7 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
 '''ARGPARSER'''
 parser = argparse.ArgumentParser()
 
-parser.add_argument("--dataset-name", type=str, default='COX2')
+parser.add_argument("--dataset-name", type=str, default='AIDS')
 parser.add_argument("--data-root", type=str, default='./dataset')
 parser.add_argument("--assets-root", type=str, default="./assets")
 
@@ -368,7 +368,7 @@ parser.add_argument("--n-layer-BERT", type=int, default=8)
 parser.add_argument("--n-head", type=int, default=2)
 parser.add_argument("--n-layer", type=int, default=2)
 parser.add_argument("--BERT-epochs", type=int, default=100)
-parser.add_argument("--epochs", type=int, default=100)
+parser.add_argument("--epochs", type=int, default=200)
 parser.add_argument("--patience", type=int, default=5)
 parser.add_argument("--n-cluster", type=int, default=3)
 parser.add_argument("--step-size", type=int, default=20)
@@ -822,13 +822,13 @@ def perform_clustering(train_cls_outputs, random_seed, n_clusters):
 #%%
 # GRAPH_AUTOENCODER 클래스 수정
 class GRAPH_AUTOENCODER(nn.Module):
-    def __init__(self, num_features, hidden_dims, max_nodes, n_head_BERT, nhead, num_layers_BERT, num_layers, dropout_rate=0.1):
+    def __init__(self, num_features, hidden_dims, max_nodes, nhead_BERT, nhead, num_layers_BERT, num_layers, dropout_rate=0.1):
         super().__init__()
         self.encoder = BertEncoder(
             num_features=num_features,
             hidden_dims=hidden_dims,
             d_model=hidden_dims[-1],
-            nhead=n_head_BERT,
+            nhead=nhead_BERT,
             num_layers=num_layers_BERT,
             max_nodes=max_nodes,
             dropout_rate=dropout_rate
@@ -928,7 +928,7 @@ def run(dataset_name, random_seed, dataset_AN, trial, device=device, epoch_resul
         num_features=num_features, 
         hidden_dims=hidden_dims, 
         max_nodes=max_nodes,
-        n_head_BERT=n_head_BERT,
+        nhead_BERT=n_head_BERT,
         nhead=n_head,
         num_layers_BERT=n_layer_BERT,
         num_layers=n_layer,
@@ -965,14 +965,14 @@ def run(dataset_name, random_seed, dataset_AN, trial, device=device, epoch_resul
             if epoch % log_interval == 0:
                 print(f'BERT Training Epoch {epoch}: Loss = {train_loss:.4f}')
         
-        for epoch in range(1, BERT_epochs+1):
-            train_adj_loss, num_sample_ = train_bert_embedding_(
-                model, train_loader, bert_optimizer, device
-            )
-            # bert_scheduler.step(train_loss)
+        # for epoch in range(1, BERT_epochs+1):
+        #     train_adj_loss, num_sample_ = train_bert_embedding_(
+        #         model, train_loader, bert_optimizer, device
+        #     )
+        #     # bert_scheduler.step(train_loss)
             
-            if epoch % log_interval == 0:
-                print(f'BERT Edge Training Epoch {epoch}: Loss = {train_adj_loss:.4f}')
+        #     if epoch % log_interval == 0:
+        #         print(f'BERT Edge Training Epoch {epoch}: Loss = {train_adj_loss:.4f}')
                       
         # 학습된 BERT 저장
         print("Saving pretrained BERT...")
@@ -994,7 +994,8 @@ def run(dataset_name, random_seed, dataset_AN, trial, device=device, epoch_resul
 
             auroc, auprc, precision, recall, f1, test_loss, test_loss_anomaly, visualization_data = evaluate_model(model, test_loader, max_nodes, cluster_centers, device)
             
-            save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/json/{dataset_name}/error_distribution_epoch_{epoch}_fold_{trial}.json'
+            # save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/json/{dataset_name}/error_distribution_epoch_{epoch}_fold_{trial}.json'
+            save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/json/{dataset_name}2/error_distribution_epoch_{epoch}_fold_{trial}.json'
             with open(save_path, 'w') as f:
                 json.dump(visualization_data, f)
             
@@ -1091,7 +1092,8 @@ if __name__ == '__main__':
 
 
 #%%
-base_dir = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/json/{dataset_name}/'
+# base_dir = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/json/{dataset_name}/'
+base_dir = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/json/{dataset_name}2/'
 
 trial = 0
 for epoch in range(1, epochs + 1):    
@@ -1117,7 +1119,15 @@ for epoch in range(1, epochs + 1):
         plt.grid(True)
 
         # 저장하거나 보여주기
-        plt.savefig(f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/plot/{dataset_name}/error_distribution_plot_epoch_{epoch}_fold_{trial}.png')  # 파일로 저장
+        # plt.savefig(f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/plot/{dataset_name}/error_distribution_plot_epoch_{epoch}_fold_{trial}.png')  # 파일로 저장
+        plt.savefig(f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/plot/{dataset_name}2/error_distribution_plot_epoch_{epoch}_fold_{trial}.png')  # 파일로 저장
         plt.show()  # 직접 보기
 
+# %%
+# current_time_ = time.localtime()
+# current_time = time.strftime("%Y_%m_%d_%H_%M", current_time_)
+# print(f'random number saving: {current_time}')
+
+# save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/json/{dataset_name}_time_{current_time}/'
+# os.makedirs(os.path.dirname(save_path), exist_ok=True)
 # %%
