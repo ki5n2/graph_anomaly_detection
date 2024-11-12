@@ -27,13 +27,16 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch_geometric.data import Data, Batch
 from torch_geometric.loader import DataLoader
 from torch_geometric.datasets import TUDataset
-from torch_geometric.utils import to_dense_adj, to_dense_batch
+from torch_geometric.utils import to_dense_adj, to_dense_batch, to_networkx, get_laplacian
 from torch_geometric.nn import GCNConv, global_mean_pool, global_max_pool, global_add_pool
 
 from sklearn.cluster import KMeans
 from scipy.spatial.distance import cdist
-from sklearn.metrics import auc, roc_curve, precision_score, recall_score, f1_score, precision_recall_curve
+from sklearn.metrics import auc, roc_curve, precision_score, recall_score, f1_score, precision_recall_curve, silhouette_score
 from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
+
+from scipy.linalg import eigh
+from scipy.cluster.hierarchy import dendrogram, linkage, fcluster
 
 from functools import partial
 from multiprocessing import Pool
@@ -41,43 +44,66 @@ from multiprocessing import Pool
 from module.loss import loss_cal
 from util import set_seed, set_device, EarlyStopping, get_ad_split_TU, get_data_loaders_TU, adj_original, batch_nodes_subgraphs
 
-from torch_geometric.utils import to_networkx, get_laplacian
-from scipy.linalg import eigh
 import networkx as nx
 
-from scipy.cluster.hierarchy import dendrogram, linkage, fcluster
-from sklearn.metrics import silhouette_score
 
 
 #%%
 '''TRAIN BERT'''
-def train_bert_embedding(model, train_loader, bert_optimizer, device):
+def train_bert_embedding(model, train_loader, bert_optimizer, bert_scheduler, device, mask_ratio=0.15):
     model.train()
     total_loss = 0
     num_sample = 0
     
-    for data in train_loader:
+    for batch_idx, data in enumerate(train_loader):
         bert_optimizer.zero_grad()
         data = data.to(device)
         x, edge_index, batch, num_graphs = data.x, data.edge_index, data.batch, data.num_graphs
         
-        # 마스크 생성
-        mask_indices = torch.rand(x.size(0), device=device) < 0.15  # 15% 노드 마스킹
+        # 마스크 생성 - 각 그래프별로 독립적으로 마스킹
+        mask_indices = []
+        start_idx = 0
+        for i in range(num_graphs):
+            graph_mask = (batch == i)
+            num_nodes = graph_mask.sum().item()
+            # 각 그래프마다 최소 1개 노드는 마스킹
+            num_masks = max(1, int(num_nodes * mask_ratio))
+            graph_indices = torch.randperm(num_nodes)[:num_masks]
+            graph_mask_indices = torch.zeros(num_nodes, device=device, dtype=torch.bool)
+            graph_mask_indices[graph_indices] = True
+            mask_indices.append(graph_mask_indices)
+            start_idx += num_nodes
         
+        mask_indices = torch.cat(mask_indices)
+
         # BERT 인코딩 및 마스크 토큰 예측만 수행
         _, _, masked_outputs = model(
             x, edge_index, batch, num_graphs, mask_indices, training=True, edge_training=False
         )
         
-        mask_loss = torch.norm(masked_outputs - x[mask_indices], p='fro')**2 / mask_indices.sum()
+        masked_features = x[mask_indices]
+        mask_loss = torch.norm(masked_outputs - masked_features, p='fro')**2 / mask_indices.sum()
+        # mask_loss = F.mse_loss(masked_outputs, masked_features)
+        
+        # Gradient clipping 추가
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        
         loss = mask_loss
         print(f'mask_node_feature:{mask_loss}')
         
         loss.backward()
         bert_optimizer.step()
+        # 배치마다 스케줄러 step
+        bert_scheduler.step()
+        
         total_loss += loss.item()
         num_sample += num_graphs
-    
+
+        if batch_idx % 10 == 0:  # 10배치마다 출력
+            print(f'Batch {batch_idx}: Loss = {loss.item():.4f}, '
+                  f'Masked nodes: {mask_indices.sum().item()}, '
+                  f'LR: {bert_optimizer.param_groups[0]["lr"]:.6f}')
+            
     return total_loss / len(train_loader), num_sample
 
 
@@ -359,7 +385,7 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
 '''ARGPARSER'''
 parser = argparse.ArgumentParser()
 
-parser.add_argument("--dataset-name", type=str, default='AIDS')
+parser.add_argument("--dataset-name", type=str, default='COX2')
 parser.add_argument("--data-root", type=str, default='./dataset')
 parser.add_argument("--assets-root", type=str, default="./assets")
 
@@ -368,7 +394,7 @@ parser.add_argument("--n-layer-BERT", type=int, default=8)
 parser.add_argument("--n-head", type=int, default=2)
 parser.add_argument("--n-layer", type=int, default=2)
 parser.add_argument("--BERT-epochs", type=int, default=100)
-parser.add_argument("--epochs", type=int, default=200)
+parser.add_argument("--epochs", type=int, default=100)
 parser.add_argument("--patience", type=int, default=5)
 parser.add_argument("--n-cluster", type=int, default=3)
 parser.add_argument("--step-size", type=int, default=20)
@@ -954,16 +980,31 @@ def run(dataset_name, random_seed, dataset_AN, trial, device=device, epoch_resul
 
         pretrain_params = list(model.encoder.parameters())
         bert_optimizer = torch.optim.Adam(pretrain_params, lr=learning_rate)
+        bert_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(bert_optimizer, mode='min', factor=0.5, patience=1000, verbose=True)
+
+        # OneCycleLR 스케줄러 사용 (warm-up과 유사한 효과)
+        bert_scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            bert_optimizer,
+            max_lr=learning_rate,
+            epochs=BERT_epochs,
+            steps_per_epoch=len(train_loader),
+            pct_start=0.1,  # 10% 구간을 warm-up에 사용
+            anneal_strategy='cos'
+        )
         # bert_scheduler = ReduceLROnPlateau(bert_optimizer, mode='min', factor=factor, patience=patience)
     
         for epoch in range(1, BERT_epochs+1):
             train_loss, num_sample = train_bert_embedding(
-                model, train_loader, bert_optimizer, device
+                model, train_loader, bert_optimizer, bert_scheduler, device
             )
-            # bert_scheduler.step(train_loss)
+            bert_scheduler.step(train_loss)
             
             if epoch % log_interval == 0:
                 print(f'BERT Training Epoch {epoch}: Loss = {train_loss:.4f}')
+        
+                current_lr = bert_optimizer.param_groups[0]['lr']
+                print(f'BERT Training Epoch {epoch}: Loss = {train_loss:.4f}, LR = {current_lr:.6f}')
+        
         
         # for epoch in range(1, BERT_epochs+1):
         #     train_adj_loss, num_sample_ = train_bert_embedding_(
@@ -994,8 +1035,8 @@ def run(dataset_name, random_seed, dataset_AN, trial, device=device, epoch_resul
 
             auroc, auprc, precision, recall, f1, test_loss, test_loss_anomaly, visualization_data = evaluate_model(model, test_loader, max_nodes, cluster_centers, device)
             
-            # save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/json/{dataset_name}/error_distribution_epoch_{epoch}_fold_{trial}.json'
-            save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/json/{dataset_name}2/error_distribution_epoch_{epoch}_fold_{trial}.json'
+            save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/json/{dataset_name}/error_distribution_epoch_{epoch}_fold_{trial}.json'
+            # save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/json/{dataset_name}2/error_distribution_epoch_{epoch}_fold_{trial}.json'
             with open(save_path, 'w') as f:
                 json.dump(visualization_data, f)
             
@@ -1092,8 +1133,8 @@ if __name__ == '__main__':
 
 
 #%%
-# base_dir = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/json/{dataset_name}/'
-base_dir = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/json/{dataset_name}2/'
+base_dir = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/json/{dataset_name}/'
+# base_dir = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/json/{dataset_name}2/'
 
 trial = 0
 for epoch in range(1, epochs + 1):    
@@ -1112,6 +1153,10 @@ for epoch in range(1, epochs + 1):
         plt.scatter(normal_recon, normal_cluster, c='blue', label='Normal', alpha=0.6)
         plt.scatter(anomaly_recon, anomaly_cluster, c='red', label='Anomaly', alpha=0.6)
 
+        # x축과 y축 범위 설정
+        plt.xlim(4.5, 10)  # x축 범위를 0~10으로 설정
+        plt.ylim(4.6, 5)   # y축 범위를 0~5로 설정
+        
         plt.xlabel('Reconstruction Error (node_loss * alpha)')
         plt.ylabel('Clustering Distance (min_distance * gamma)')
         plt.title('Error Distribution')
@@ -1119,9 +1164,10 @@ for epoch in range(1, epochs + 1):
         plt.grid(True)
 
         # 저장하거나 보여주기
-        # plt.savefig(f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/plot/{dataset_name}/error_distribution_plot_epoch_{epoch}_fold_{trial}.png')  # 파일로 저장
-        plt.savefig(f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/plot/{dataset_name}2/error_distribution_plot_epoch_{epoch}_fold_{trial}.png')  # 파일로 저장
+        plt.savefig(f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/plot/{dataset_name}/error_distribution_plot_epoch_{epoch}_fold_{trial}.png')  # 파일로 저장
+        # plt.savefig(f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/plot/{dataset_name}2/error_distribution_plot_epoch_{epoch}_fold_{trial}.png')  # 파일로 저장
         plt.show()  # 직접 보기
+        
 
 # %%
 # current_time_ = time.localtime()
