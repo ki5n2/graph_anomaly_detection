@@ -15,6 +15,7 @@ import torch
 import random
 import argparse
 import numpy as np
+import seaborn as sns
 import torch.nn as nn
 import torch.optim as optim
 import matplotlib.pyplot as plt
@@ -31,9 +32,12 @@ from torch_geometric.utils import to_dense_adj, to_dense_batch, to_networkx, get
 from torch_geometric.nn import GCNConv, global_mean_pool, global_max_pool, global_add_pool
 
 from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
 from scipy.spatial.distance import cdist
 from sklearn.metrics import auc, roc_curve, precision_score, recall_score, f1_score, precision_recall_curve, silhouette_score
 from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
+from sklearn.metrics.pairwise import rbf_kernel
+from sklearn.cluster import SpectralClustering
 
 from scipy.linalg import eigh
 from scipy.cluster.hierarchy import dendrogram, linkage, fcluster
@@ -45,7 +49,6 @@ from module.loss import loss_cal
 from util import set_seed, set_device, EarlyStopping, get_ad_split_TU, get_data_loaders_TU, adj_original, batch_nodes_subgraphs
 
 import networkx as nx
-
 
 
 #%%
@@ -382,6 +385,168 @@ def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
 
 
 #%%
+def analyze_cls_embeddings(model, test_loader, device, n_components=2):
+    """
+    CLS token embeddings를 추출하고 PCA를 적용하여 더 자세한 분석 수행
+    
+    Args:
+        model: 학습된 모델
+        test_loader: 테스트 데이터 로더
+        device: 연산 장치
+        n_components: PCA 차원 수
+    """
+    model.eval()
+    cls_embeddings = []
+    labels = []
+    
+    # CLS embeddings 추출
+    with torch.no_grad():
+        for data in test_loader:
+            data = data.to(device)
+            x, edge_index, batch, num_graphs = data.x, data.edge_index, data.batch, data.num_graphs
+            
+            cls_output, _ = model(x, edge_index, batch, num_graphs)
+            cls_embeddings.append(cls_output.cpu())
+            labels.extend(data.y.cpu().numpy())
+    
+    # 텐서를 numpy 배열로 변환
+    cls_embeddings = torch.cat(cls_embeddings, dim=0).numpy()
+    labels = np.array(labels)
+    
+    # PCA 적용
+    pca = PCA()
+    cls_embeddings_pca = pca.fit_transform(cls_embeddings)
+    
+    # 분산 설명률 계산
+    explained_variance_ratio = pca.explained_variance_ratio_
+    cumulative_variance_ratio = np.cumsum(explained_variance_ratio)
+    eigenvalues = pca.explained_variance_
+    
+    # 시각화
+    plt.figure(figsize=(20, 15))
+    
+    # 1. PCA 산점도 (첫 2개 주성분)
+    plt.subplot(221)
+    scatter = plt.scatter(cls_embeddings_pca[:, 0], cls_embeddings_pca[:, 1], 
+                         c=labels, cmap='coolwarm', alpha=0.6)
+    plt.colorbar(scatter, label='Label (0: Normal, 1: Anomaly)')
+    plt.xlabel(f'PC1 (variance ratio: {explained_variance_ratio[0]:.3f})')
+    plt.ylabel(f'PC2 (variance ratio: {explained_variance_ratio[1]:.3f})')
+    plt.title('PCA of CLS Token Embeddings')
+    
+    # 2. 누적 분산 설명률
+    plt.subplot(222)
+    plt.plot(range(1, len(cumulative_variance_ratio) + 1), 
+             cumulative_variance_ratio, 'bo-')
+    plt.axhline(y=0.95, color='r', linestyle='--', label='95% threshold')
+    plt.xlabel('Number of Components')
+    plt.ylabel('Cumulative Explained Variance Ratio')
+    plt.title('Cumulative Explained Variance Ratio')
+    plt.grid(True)
+    plt.legend()
+    
+    # 3. 스크린 플롯
+    plt.subplot(223)
+    plt.plot(range(1, len(eigenvalues) + 1), eigenvalues, 'bo-')
+    plt.xlabel('Principal Component')
+    plt.ylabel('Eigenvalue')
+    plt.title('Scree Plot')
+    plt.grid(True)
+    
+    # 4. 로그 스케일 스크린 플롯
+    plt.subplot(224)
+    plt.plot(range(1, len(eigenvalues) + 1), eigenvalues, 'bo-')
+    plt.yscale('log')
+    plt.xlabel('Principal Component')
+    plt.ylabel('Eigenvalue (log scale)')
+    plt.title('Scree Plot (Log Scale)')
+    plt.grid(True)
+    
+    plt.tight_layout()
+    
+    # 분석 결과 저장
+    save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/pca_analysis/cls_pca_analysis_{dataset_name}_{current_time}.png'
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path)
+    plt.close()
+    
+    # 주요 지표 계산
+    n_components_90 = np.argmax(cumulative_variance_ratio >= 0.9) + 1
+    n_components_95 = np.argmax(cumulative_variance_ratio >= 0.95) + 1
+    
+    # 분석 결과 출력
+    print("\nPCA Analysis Results:")
+    print(f"Number of features in original space: {cls_embeddings.shape[1]}")
+    print(f"Number of components needed for 90% variance: {n_components_90}")
+    print(f"Number of components needed for 95% variance: {n_components_95}")
+    print("\nTop 5 Principal Components:")
+    for i in range(5):
+        print(f"PC{i+1}: {explained_variance_ratio[i]:.4f} "
+              f"(cumulative: {cumulative_variance_ratio[i]:.4f})")
+    
+    # Class separation analysis
+    normal_indices = labels == 0
+    anomaly_indices = labels == 1
+    
+    pc1_normal = cls_embeddings_pca[normal_indices, 0]
+    pc1_anomaly = cls_embeddings_pca[anomaly_indices, 0]
+    pc2_normal = cls_embeddings_pca[normal_indices, 1]
+    pc2_anomaly = cls_embeddings_pca[anomaly_indices, 1]
+    
+    print("\nClass Separation Analysis:")
+    print("PC1 - Normal vs Anomaly:")
+    print(f"Normal mean: {np.mean(pc1_normal):.4f}, std: {np.std(pc1_normal):.4f}")
+    print(f"Anomaly mean: {np.mean(pc1_anomaly):.4f}, std: {np.std(pc1_anomaly):.4f}")
+    print("\nPC2 - Normal vs Anomaly:")
+    print(f"Normal mean: {np.mean(pc2_normal):.4f}, std: {np.std(pc2_normal):.4f}")
+    print(f"Anomaly mean: {np.mean(pc2_anomaly):.4f}, std: {np.std(pc2_anomaly):.4f}")
+    
+    return cls_embeddings_pca, explained_variance_ratio, eigenvalues
+
+
+#%%
+def perform_clustering(train_cls_outputs, random_seed, n_clusters):
+    """
+    스펙트럴 클러스터링을 수행하는 함수
+    
+    Args:
+        train_cls_outputs: 학습 데이터의 CLS 토큰 출력값
+        random_seed: 랜덤 시드
+        n_clusters: 클러스터 수
+    
+    Returns:
+        spectral: 학습된 스펙트럴 클러스터링 모델
+        cluster_centers: 각 클러스터의 중심점
+    """
+    # CPU로 이동 및 Numpy 배열로 변환
+    cls_outputs_np = train_cls_outputs.detach().cpu().numpy()
+    
+    # 유사도 행렬 계산 (RBF 커널 사용)
+    affinity_matrix = rbf_kernel(cls_outputs_np)
+    
+    # 스펙트럴 클러스터링 수행
+    spectral = SpectralClustering(
+        n_clusters=n_clusters,
+        random_state=random_seed,
+        affinity='precomputed',  # 미리 계산된 유사도 행렬 사용
+        assign_labels='kmeans'    # 최종 클러스터 할당에 k-means 사용
+    )
+    cluster_labels = spectral.fit_predict(affinity_matrix)
+    
+    # 각 클러스터의 중심점 계산
+    cluster_centers = []
+    for i in range(n_clusters):
+        cluster_points = cls_outputs_np[cluster_labels == i]
+        if len(cluster_points) > 0:  # 빈 클러스터 방지
+            center = cluster_points.mean(axis=0)
+            cluster_centers.append(center)
+    
+    cluster_centers = np.array(cluster_centers)
+    
+    return spectral, cluster_centers
+
+
+#%%
 '''ARGPARSER'''
 parser = argparse.ArgumentParser()
 
@@ -389,10 +554,10 @@ parser.add_argument("--dataset-name", type=str, default='COX2')
 parser.add_argument("--data-root", type=str, default='./dataset')
 parser.add_argument("--assets-root", type=str, default="./assets")
 
-parser.add_argument("--n-head-BERT", type=int, default=8)
-parser.add_argument("--n-layer-BERT", type=int, default=8)
-parser.add_argument("--n-head", type=int, default=2)
-parser.add_argument("--n-layer", type=int, default=2)
+parser.add_argument("--n-head-BERT", type=int, default=2)
+parser.add_argument("--n-layer-BERT", type=int, default=2)
+parser.add_argument("--n-head", type=int, default=8)
+parser.add_argument("--n-layer", type=int, default=8)
 parser.add_argument("--BERT-epochs", type=int, default=100)
 parser.add_argument("--epochs", type=int, default=100)
 parser.add_argument("--patience", type=int, default=5)
@@ -410,7 +575,7 @@ parser.add_argument("--factor", type=float, default=0.5)
 parser.add_argument("--test-size", type=float, default=0.25)
 parser.add_argument("--dropout-rate", type=float, default=0.1)
 parser.add_argument("--weight-decay", type=float, default=0.0001)
-parser.add_argument("--learning-rate", type=float, default=0.0001)
+parser.add_argument("--learning-rate", type=float, default=0.00001)
 
 parser.add_argument("--alpha", type=float, default=1.0)
 parser.add_argument("--beta", type=float, default=0.05)
@@ -839,10 +1004,10 @@ class TransformerEncoder(nn.Module):
         return output
     
 
-def perform_clustering(train_cls_outputs, random_seed, n_clusters):
-    cls_outputs_np = train_cls_outputs.detach().cpu().numpy()
-    kmeans = KMeans(n_clusters=n_clusters, random_state=random_seed, n_init="auto").fit(cls_outputs_np)
-    return kmeans, kmeans.cluster_centers_
+# def perform_clustering(train_cls_outputs, random_seed, n_clusters):
+#     cls_outputs_np = train_cls_outputs.detach().cpu().numpy()
+#     kmeans = KMeans(n_clusters=n_clusters, random_state=random_seed, n_init="auto").fit(cls_outputs_np)
+#     return kmeans, kmeans.cluster_centers_
             
 
 #%%
@@ -929,6 +1094,10 @@ print(f'Number of graphs: {num_train}')
 print(f'Number of features: {num_features}')
 print(f'Number of edge features: {num_edge_features}')
 print(f'Max nodes: {max_nodes}')
+
+current_time_ = time.localtime()
+current_time = time.strftime("%Y_%m_%d_%H_%M", current_time_)
+print(f'random number saving: {current_time}')
 
 
 # %%
@@ -1030,9 +1199,15 @@ def run(dataset_name, random_seed, dataset_AN, trial, device=device, epoch_resul
         info_train = 'Epoch {:3d}, Loss {:.4f}'.format(epoch, train_loss)
 
         if epoch % log_interval == 0:
-            kmeans, cluster_centers = perform_clustering(train_cls_outputs, random_seed, n_clusters=n_cluster)
-            cluster_centers = cluster_centers.reshape(-1, hidden_dims[-1])
+            # kmeans, cluster_centers = perform_clustering(train_cls_outputs, random_seed, n_clusters=n_cluster)
+            # cluster_centers = cluster_centers.reshape(-1, hidden_dims[-1])
 
+            spectral, cluster_centers = perform_clustering(train_cls_outputs, random_seed, n_clusters=n_cluster)
+            print(spectral)
+            print(cluster_centers)
+            print(cluster_centers.shape)
+            cluster_centers = cluster_centers.reshape(-1, hidden_dims[-1])
+            print(cluster_centers.shape)
             auroc, auprc, precision, recall, f1, test_loss, test_loss_anomaly, visualization_data = evaluate_model(model, test_loader, max_nodes, cluster_centers, device)
             
             save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/json/{dataset_name}/error_distribution_epoch_{epoch}_fold_{trial}.json'
@@ -1056,8 +1231,11 @@ def run(dataset_name, random_seed, dataset_AN, trial, device=device, epoch_resul
                 epoch_results[epoch]['precisions'].append(precision)
                 epoch_results[epoch]['recalls'].append(recall)
                 epoch_results[epoch]['f1s'].append(f1)
-                
-    return auroc, epoch_results
+            
+            # run() 함수 내에서 평가 시점에 다음 코드 추가
+            cls_embeddings_pca, explained_variance_ratio, eigenvalues = analyze_cls_embeddings(model, test_loader, device)
+            
+    return auroc, epoch_results, cls_embeddings_pca, explained_variance_ratio, eigenvalues
 
 
 #%%
@@ -1072,7 +1250,7 @@ if __name__ == '__main__':
     for trial in range(n_cross_val):
         fold_start = time.time()  # 현재 폴드 시작 시간
         print(f"Starting fold {trial + 1}/{n_cross_val}")
-        ad_auc, epoch_results = run(dataset_name, random_seed, dataset_AN, trial, device=device, epoch_results=epoch_results)
+        ad_auc, epoch_results, cls_embeddings_pca, explained_variance_ratio, eigenvalues = run(dataset_name, random_seed, dataset_AN, trial, device=device, epoch_results=epoch_results)
         ad_aucs.append(ad_auc)
         
         fold_end = time.time()  # 현재 폴드 종료 시간   
@@ -1133,8 +1311,8 @@ if __name__ == '__main__':
 
 
 #%%
-base_dir = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/json/{dataset_name}/'
-# base_dir = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/json/{dataset_name}2/'
+# base_dir = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/json/{dataset_name}/'
+base_dir = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/json/{dataset_name}_rand_18034064/'
 
 trial = 0
 for epoch in range(1, epochs + 1):    
@@ -1154,8 +1332,8 @@ for epoch in range(1, epochs + 1):
         plt.scatter(anomaly_recon, anomaly_cluster, c='red', label='Anomaly', alpha=0.6)
 
         # x축과 y축 범위 설정
-        plt.xlim(4.5, 10)  # x축 범위를 0~10으로 설정
-        plt.ylim(4.6, 5)   # y축 범위를 0~5로 설정
+        plt.xlim(4, 10)  # x축 범위를 0~10으로 설정
+        plt.ylim(2, 5)   # y축 범위를 0~5로 설정
         
         plt.xlabel('Reconstruction Error (node_loss * alpha)')
         plt.ylabel('Clustering Distance (min_distance * gamma)')
@@ -1164,7 +1342,7 @@ for epoch in range(1, epochs + 1):
         plt.grid(True)
 
         # 저장하거나 보여주기
-        plt.savefig(f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/plot/{dataset_name}/error_distribution_plot_epoch_{epoch}_fold_{trial}.png')  # 파일로 저장
+        plt.savefig(f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/plot/{dataset_name}_rand_18034064/error_distribution_plot_epoch_{epoch}_fold_{trial}.png')  # 파일로 저장
         # plt.savefig(f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/plot/{dataset_name}2/error_distribution_plot_epoch_{epoch}_fold_{trial}.png')  # 파일로 저장
         plt.show()  # 직접 보기
         
