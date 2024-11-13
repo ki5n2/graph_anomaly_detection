@@ -1203,11 +1203,8 @@ def run(dataset_name, random_seed, dataset_AN, trial, device=device, epoch_resul
             # cluster_centers = cluster_centers.reshape(-1, hidden_dims[-1])
 
             spectral, cluster_centers = perform_clustering(train_cls_outputs, random_seed, n_clusters=n_cluster)
-            print(spectral)
-            print(cluster_centers)
-            print(cluster_centers.shape)
             cluster_centers = cluster_centers.reshape(-1, hidden_dims[-1])
-            print(cluster_centers.shape)
+            
             auroc, auprc, precision, recall, f1, test_loss, test_loss_anomaly, visualization_data = evaluate_model(model, test_loader, max_nodes, cluster_centers, device)
             
             save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/json/{dataset_name}/error_distribution_epoch_{epoch}_fold_{trial}.json'
