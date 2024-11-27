@@ -6,3 +6,6 @@ torch_geometric
 community
 wandb
 torch_scatter
+seaborn
+gudhi
+plotly

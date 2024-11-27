@@ -1,6 +1,6 @@
 #%%
 '''PRESENT'''
-print('이번 BERT 모델 7은 AIDS, BZR, COX2, DHFR에 대한 실험 파일입니다. 마스크 토큰 재구성을 통한 프리-트레인이 이루어지고 엣지 재구성은 학습된 노드 임베딩을 바탕으로 수행됩니다. 이 때 마스크는 더 이상 사용되지 않습니다. 이후 기존과 같이 노드 특성을 재구성하는 모델을 통해 이상을 탐지합니다.')
+print('이번 BERT 모델 10은 AIDS, BZR, COX2, DHFR에 대한 실험 파일입니다. 마스크 토큰 재구성을 통한 프리-트레인이 이루어집니다. 이후 기존과 같이 노드 특성을 재구성하는 모델을 통해 이상을 탐지합니다. 기존 파일과 다른 점은 성능 평가 결과 비교를 코드 내에서 수행하고자 하였으며, 해당 파일만 실행하면 결과까지 한 번에 볼 수 있도록 하였습니다. 또한, 재구성 오류에 대한 정규화가 이루어져 있습니다. 훈련 데이터에 대한 산점도와 로그 스케일이 적용되어 있습니다. 또한, 클러스터링 품질 평가와 더불어 하이라키컬 클러스터링이 적용되어 있습니다.')
 
 #%%
 '''IMPORTS'''
@@ -28,274 +28,66 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch_geometric.data import Data, Batch
 from torch_geometric.loader import DataLoader
 from torch_geometric.datasets import TUDataset
-from torch_geometric.utils import to_dense_adj, to_dense_batch, to_networkx, get_laplacian
+from torch.optim.lr_scheduler import CosineAnnealingLR, ExponentialLR, OneCycleLR
 from torch_geometric.nn import GCNConv, global_mean_pool, global_max_pool, global_add_pool
+from torch_geometric.utils import to_networkx, get_laplacian, to_dense_adj, to_dense_batch
+
+from scipy.linalg import eigh
+from scipy.spatial.distance import cdist, pdist
+from scipy.stats import wasserstein_distance
+from scipy.cluster.hierarchy import linkage, dendrogram, fcluster, cophenet
 
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
-from scipy.spatial.distance import cdist
-from sklearn.metrics import auc, roc_curve, precision_score, recall_score, f1_score, precision_recall_curve, silhouette_score
-from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
-from sklearn.metrics.pairwise import rbf_kernel
 from sklearn.cluster import SpectralClustering
+from sklearn.neighbors import kneighbors_graph
 from sklearn.manifold import SpectralEmbedding
-from matplotlib.colors import Normalize
-
-from scipy.linalg import eigh
-from scipy.cluster.hierarchy import dendrogram, linkage, fcluster
+from sklearn.metrics.pairwise import rbf_kernel, cosine_similarity
+from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
+from sklearn.metrics import auc, roc_curve, precision_score, recall_score, f1_score, precision_recall_curve, roc_auc_score, silhouette_score, silhouette_samples
 
 from functools import partial
 from multiprocessing import Pool
 
 from module.loss import loss_cal
-from util import set_seed, set_device, EarlyStopping, get_ad_split_TU, get_data_loaders_TU, adj_original, batch_nodes_subgraphs, visualize
+from util import set_seed, set_device, EarlyStopping, get_ad_split_TU, get_data_loaders_TU, adj_original, batch_nodes_subgraphs
 
 import networkx as nx
-
-from mpl_toolkits.mplot3d import Axes3D
-from torch_geometric.utils import to_networkx
-from torch_geometric.data import Data
 
 
 #%%
 '''TRAIN BERT'''
-def train_bert_embedding(model, train_loader, bert_optimizer, bert_scheduler, device, mask_ratio=0.15):
+def train_bert_embedding(model, train_loader, bert_optimizer, device):
     model.train()
     total_loss = 0
     num_sample = 0
     
-    for batch_idx, data in enumerate(train_loader):
+    for data in train_loader:
         bert_optimizer.zero_grad()
         data = data.to(device)
         x, edge_index, batch, num_graphs = data.x, data.edge_index, data.batch, data.num_graphs
         
-        # 마스크 생성 - 각 그래프별로 독립적으로 마스킹
-        mask_indices = []
-        start_idx = 0
-        for i in range(num_graphs):
-            graph_mask = (batch == i)
-            num_nodes = graph_mask.sum().item()
-            # 각 그래프마다 최소 1개 노드는 마스킹
-            num_masks = max(1, int(num_nodes * mask_ratio))
-            graph_indices = torch.randperm(num_nodes)[:num_masks]
-            graph_mask_indices = torch.zeros(num_nodes, device=device, dtype=torch.bool)
-            graph_mask_indices[graph_indices] = True
-            mask_indices.append(graph_mask_indices)
-            start_idx += num_nodes
+        # 마스크 생성
+        mask_indices = torch.rand(x.size(0), device=device) < 0.15  # 15% 노드 마스킹
         
-        mask_indices = torch.cat(mask_indices)
-
         # BERT 인코딩 및 마스크 토큰 예측만 수행
         _, _, masked_outputs = model(
             x, edge_index, batch, num_graphs, mask_indices, training=True, edge_training=False
         )
         
-        masked_features = x[mask_indices]
-        mask_loss = torch.norm(masked_outputs - masked_features, p='fro')**2 / mask_indices.sum()
-        # mask_loss = F.mse_loss(masked_outputs, masked_features)
-        
-        # Gradient clipping 추가
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        
+        mask_loss = torch.norm(masked_outputs - x[mask_indices], p='fro')**2 / mask_indices.sum()
         loss = mask_loss
         print(f'mask_node_feature:{mask_loss}')
         
         loss.backward()
         bert_optimizer.step()
-        # 배치마다 스케줄러 step
-        bert_scheduler.step()
-        
         total_loss += loss.item()
         num_sample += num_graphs
-
-        if batch_idx % 10 == 0:  # 10배치마다 출력
-            print(f'Batch {batch_idx}: Loss = {loss.item():.4f}, '
-                  f'Masked nodes: {mask_indices.sum().item()}, '
-                  f'LR: {bert_optimizer.param_groups[0]["lr"]:.6f}')
-            
+    
     return total_loss / len(train_loader), num_sample
 
 
 #%%
-# def train_bert_embedding_(model, train_loader, bert_optimizer, device):
-#     model.train()
-#     total_loss = 0
-#     num_sample = 0
-    
-#     for data in train_loader:
-#         bert_optimizer.zero_grad()
-#         data = data.to(device)
-#         x, edge_index, batch, num_graphs = data.x, data.edge_index, data.batch, data.num_graphs
-        
-#         adj = adj_original(edge_index, batch, max_nodes)
-        
-#         # BERT 인코딩 및 마스크 토큰 예측만 수행
-#         _, _, adj_recon_list = model(
-#             x, edge_index, batch, num_graphs, training=True, edge_training=True
-#         )
-
-#         loss = 0
-#         start_node = 0
-#         for i in range(num_graphs):
-#             num_nodes = (batch == i).sum().item()
-#             end_node = start_node + num_nodes
-            
-#             adj_loss = torch.norm(adj_recon_list[i] - adj[i], p='fro')**2 / num_nodes
-#             adj_loss = adj_loss / 20
-#             loss += adj_loss
-            
-#             start_node = end_node
-            
-#         print(f'edge_loss:{loss}')
-#         # print(f'mask_label:{mask_loss_}')
-        
-#         loss.backward()
-#         bert_optimizer.step()
-#         total_loss += loss.item()
-#         num_sample += num_graphs
-    
-#     return total_loss / len(train_loader), num_sample
-
-
-# '''EVALUATION'''
-# def evaluate_model(model, test_loader, max_nodes, cluster_centers, device):
-#     model.eval()
-#     total_loss_ = 0
-#     total_loss_anomaly_ = 0
-#     total_loss_mean = 0
-#     total_loss_anomaly_mean = 0
-
-#     all_labels = []
-#     all_scores = []
-
-#     with torch.no_grad():
-#         for data in test_loader:
-#             data = data.to(device)
-#             x, edge_index, batch, num_graphs = data.x, data.edge_index, data.batch, data.num_graphs
-
-#             e_cls_output, x_recon = model(x, edge_index, batch, num_graphs)
-
-#             recon_errors = []
-#             start_node = 0
-#             for i in range(num_graphs):
-#                 num_nodes = (batch == i).sum().item()
-#                 end_node = start_node + num_nodes
-                
-#                 node_loss = torch.norm(x[start_node:end_node] - x_recon[start_node:end_node], p='fro')**2 / num_nodes
-                
-#                 # cls_vec = e_cls_output[i].cpu().numpy()  # [hidden_dim]
-#                 cls_vec = e_cls_output[i].detach().cpu().numpy()  # [hidden_dim]
-#                 distances = cdist([cls_vec], cluster_centers, metric='euclidean')  # [1, n_clusters]
-#                 min_distance = distances.min()
-
-#                 recon_error = (node_loss.item() * alpha) + (min_distance.item() * gamma)              
-#                 recon_errors.append(recon_error)
-                
-#                 print(f'test_node_loss: {node_loss.item() * alpha}')
-#                 print(f'test_min_distance: {min_distance.item() * gamma}')
-
-#                 if data.y[i].item() == 0:
-#                     total_loss_ += recon_error
-#                 else:
-#                     total_loss_anomaly_ += recon_error
-
-#                 start_node = end_node
-            
-#             total_loss = total_loss_ / sum(data.y == 0)
-#             total_loss_anomaly = total_loss_anomaly_ / sum(data.y == 1)
-            
-#             total_loss_mean += total_loss
-#             total_loss_anomaly_mean += total_loss_anomaly
-            
-#             all_scores.extend(recon_errors)
-#             all_labels.extend(data.y.cpu().numpy())
-
-#     all_labels = np.array(all_labels)
-#     all_scores = np.array(all_scores)
-
-#     # Compute metrics
-#     fpr, tpr, thresholds = roc_curve(all_labels, all_scores)
-#     auroc = auc(fpr, tpr)
-#     precision, recall, _ = precision_recall_curve(all_labels, all_scores)
-#     auprc = auc(recall, precision)
-
-#     optimal_idx = np.argmax(tpr - fpr)
-#     optimal_threshold = thresholds[optimal_idx]
-#     pred_labels = (all_scores > optimal_threshold).astype(int)
-
-#     precision = precision_score(all_labels, pred_labels)
-#     recall = recall_score(all_labels, pred_labels)
-#     f1 = f1_score(all_labels, pred_labels)
-
-#     return auroc, auprc, precision, recall, f1, total_loss_mean / len(test_loader), total_loss_anomaly_mean / len(test_loader)
-
-
-#%%
-def train(model, train_loader, recon_optimizer, max_nodes, device):
-    model.train()
-    total_loss = 0
-    total_recon_loss = 0
-    total_cls_loss = 0
-    num_sample = 0
-    
-    for data in train_loader:
-        recon_optimizer.zero_grad()
-        data = data.to(device)
-        x, edge_index, batch, num_graphs = data.x, data.edge_index, data.batch, data.num_graphs
-        
-        train_cls_outputs, x_recon = model(x, edge_index, batch, num_graphs)
-        
-        recon_loss = 0
-        start_node = 0
-        for i in range(num_graphs):
-            num_nodes = (batch == i).sum().item()
-            end_node = start_node + num_nodes
-
-            node_loss = torch.norm(x[start_node:end_node] - x_recon[start_node:end_node], p='fro')**2 / num_nodes
-            
-            recon_loss += node_loss
-
-            start_node = end_node
-                
-        # CLS Similarity Loss
-        if num_graphs > 1:  # 배치에 2개 이상의 그래프가 있을 때만 계산
-            # 1. Pairwise Distance Matrix 계산
-            cls_distances = torch.cdist(train_cls_outputs, train_cls_outputs, p=2)  # [num_graphs, num_graphs]
-            
-            # 2. 대각선 요소 제외 (자기 자신과의 거리)
-            mask = ~torch.eye(num_graphs, dtype=bool, device=device)
-            cls_distances = cls_distances[mask]
-            
-            # 3. 평균 거리 계산
-            cls_loss = cls_distances.mean()
-        else:
-            cls_loss = torch.tensor(0.0, device=device)
-                
-        # Total Loss (alpha는 CLS 손실의 가중치)
-        alpha = 10.0  # 이 값은 조정 가능
-        cls_loss = alpha * cls_loss
-        loss = recon_loss + cls_loss
-            
-        num_sample += num_graphs
-        loss.backward()
-        recon_optimizer.step()
-        
-        total_loss += loss.item()
-        total_recon_loss += recon_loss.item()
-        total_cls_loss += cls_loss.item()
-        
-        print(f'train_recon_loss: {recon_loss.item():.4f}, train_cls_loss: {cls_loss.item():.4f}')
-
-    avg_loss = total_loss / len(train_loader)
-    avg_recon_loss = total_recon_loss / len(train_loader)
-    avg_cls_loss = total_cls_loss / len(train_loader)
-    
-    print(f'Average reconstruction loss: {avg_recon_loss:.4f}')
-    print(f'Average CLS similarity loss: {avg_cls_loss:.4f}')        
-        
-    return avg_loss, num_sample, train_cls_outputs.detach().cpu()
-
-
 def train(model, train_loader, recon_optimizer, max_nodes, device):
     model.train()
     total_loss = 0
@@ -332,7 +124,7 @@ def train(model, train_loader, recon_optimizer, max_nodes, device):
 
 
 #%%
-def evaluate_model(model, test_loader, cluster_centers, n_clusters, gamma_clusters, random_seed, device):
+def evaluate_model(model, test_loader, cluster_centers, device):
     model.eval()
     total_loss_ = 0
     total_loss_anomaly_ = 0
@@ -345,17 +137,7 @@ def evaluate_model(model, test_loader, cluster_centers, n_clusters, gamma_cluste
             data = data.to(device)
             x, edge_index, batch, num_graphs = data.x, data.edge_index, data.batch, data.num_graphs
             e_cls_output, x_recon = model(x, edge_index, batch, num_graphs)
-            
-            e_cls_outputs_np = e_cls_output.detach().cpu().numpy()  # [num_graphs, hidden_dim]
-            spectral_embedder_test = SpectralEmbedding(
-                n_components=n_clusters, 
-                affinity='rbf', 
-                gamma=gamma_clusters,
-                random_state=random_seed
-            )
 
-            spectral_embeddings_test = spectral_embedder_test.fit_transform(e_cls_outputs_np)  # [num_graphs, k]
-            
             recon_errors = []
             start_node = 0
             
@@ -366,10 +148,9 @@ def evaluate_model(model, test_loader, cluster_centers, n_clusters, gamma_cluste
                 # Reconstruction error 계산
                 node_loss = torch.norm(x[start_node:end_node] - x_recon[start_node:end_node], p='fro')**2 / num_nodes
                 node_loss = node_loss.item() * alpha
-                transformed_cls_vec = spectral_embeddings_test[i]  # [k]
-                transformed_cls_vec = np.reshape(transformed_cls_vec, (1, -1))  # 또는 transformed_cls_vec[None, :]
-                distances = cdist(transformed_cls_vec, cluster_centers, metric='euclidean')
-                # distances = cdist([transformed_cls_vec], cluster_centers, metric='euclidean')  # [1, n_clusters]
+                
+                cls_vec = e_cls_output[i].detach().cpu().numpy()
+                distances = cdist([cls_vec], cluster_centers, metric='euclidean')
                 min_distance = distances.min().item() * gamma
                 
                 # 변환된 값들 저장
@@ -435,7 +216,7 @@ def evaluate_model(model, test_loader, cluster_centers, n_clusters, gamma_cluste
 
 
 #%%
-def analyze_cls_embeddings(model, test_loader, device, n_components=2):
+def analyze_cls_embeddings(model, test_loader, epoch, device, n_components=2):
     """
     CLS token embeddings를 추출하고 PCA를 적용하여 더 자세한 분석 수행
     
@@ -555,56 +336,21 @@ def analyze_cls_embeddings(model, test_loader, device, n_components=2):
 
 
 #%%
-def perform_clustering(train_cls_outputs, random_seed, n_clusters, gamma_clusters):
-    """
-    스펙트럴 클러스터링을 수행하는 함수
-    
-    Args:
-        train_cls_outputs: 학습 데이터의 CLS 토큰 출력값
-        random_seed: 랜덤 시드
-        n_clusters: 클러스터 수
-    
-    Returns:
-        spectral: 학습된 스펙트럴 클러스터링 모델
-        cluster_centers: 각 클러스터의 중심점
-    """
-    # CPU로 이동 및 Numpy 배열로 변환
-    cls_outputs_np = train_cls_outputs.detach().cpu().numpy()
-    
-    # 고유벡터 기반의 k차원 임베딩 생성
-    spectral_embedder = SpectralEmbedding(
-        n_components=n_clusters, 
-        affinity='rbf', 
-        gamma=gamma_clusters,
-        random_state=random_seed
-    )
-    spectral_embeddings = spectral_embedder.fit_transform(cls_outputs_np)  # [num_samples, k]
-    
-    # k-평균 클러스터링 수행
-    kmeans = KMeans(n_clusters=n_clusters, random_state=random_seed)
-    cluster_labels = kmeans.fit_predict(spectral_embeddings)
-    
-    cluster_centers = kmeans.cluster_centers_
-    
-    return spectral_embedder, cluster_centers
-
-
-#%%
 '''ARGPARSER'''
 parser = argparse.ArgumentParser()
 
-parser.add_argument("--dataset-name", type=str, default='COX2')
+parser.add_argument("--dataset-name", type=str, default='AIDS')
 parser.add_argument("--data-root", type=str, default='./dataset')
 parser.add_argument("--assets-root", type=str, default="./assets")
 
 parser.add_argument("--n-head-BERT", type=int, default=2)
 parser.add_argument("--n-layer-BERT", type=int, default=2)
-parser.add_argument("--n-head", type=int, default=8)
-parser.add_argument("--n-layer", type=int, default=8)
+parser.add_argument("--n-head", type=int, default=2)
+parser.add_argument("--n-layer", type=int, default=2)
 parser.add_argument("--BERT-epochs", type=int, default=100)
-parser.add_argument("--epochs", type=int, default=100)
+parser.add_argument("--epochs", type=int, default=150)
 parser.add_argument("--patience", type=int, default=5)
-parser.add_argument("--n-cluster", type=int, default=21)
+parser.add_argument("--n-cluster", type=int, default=1)
 parser.add_argument("--step-size", type=int, default=20)
 parser.add_argument("--n-cross-val", type=int, default=5)
 parser.add_argument("--random-seed", type=int, default=1)
@@ -618,11 +364,11 @@ parser.add_argument("--factor", type=float, default=0.5)
 parser.add_argument("--test-size", type=float, default=0.25)
 parser.add_argument("--dropout-rate", type=float, default=0.1)
 parser.add_argument("--weight-decay", type=float, default=0.0001)
-parser.add_argument("--learning-rate", type=float, default=0.00001)
+parser.add_argument("--learning-rate", type=float, default=0.0001)
 
 parser.add_argument("--alpha", type=float, default=1.0)
 parser.add_argument("--beta", type=float, default=0.05)
-parser.add_argument("--gamma", type=float, default=0.001)
+parser.add_argument("--gamma", type=float, default=0.5)
 parser.add_argument("--gamma-cluster", type=float, default=0.5)
 parser.add_argument("--node-theta", type=float, default=0.03)
 parser.add_argument("--adj-theta", type=float, default=0.01)
@@ -1049,12 +795,152 @@ class TransformerEncoder(nn.Module):
         return output
     
 
-# def perform_clustering(train_cls_outputs, random_seed, n_clusters):
-#     cls_outputs_np = train_cls_outputs.detach().cpu().numpy()
-#     kmeans = KMeans(n_clusters=n_clusters, random_state=random_seed, n_init="auto").fit(cls_outputs_np)
-#     return kmeans, kmeans.cluster_centers_
+#%%
+class HierarchicalClusterAnalyzer:
+    def __init__(self, distance_threshold=None, max_clusters=None):
+        """
+        Parameters:
+        -----------
+        distance_threshold : float or None
+            클러스터 간 최대 거리 임계값
+        max_clusters : int or None
+            최대 클러스터 수 제한
+        """
+        self.distance_threshold = distance_threshold
+        self.max_clusters = max_clusters
+        
+    def fit_predict(self, cls_embeddings, epoch=None):
+        """
+        계층적 클러스터링 수행 및 분석
+        
+        Parameters:
+        -----------
+        cls_embeddings : torch.Tensor or numpy.ndarray
+            CLS 임베딩 벡터들
+        epoch : int or None
+            현재 에폭 (시각화 저장용)
             
+        Returns:
+        --------
+        cluster_centers : numpy.ndarray
+            클러스터 중심점들
+        clustering_metrics : dict
+            클러스터링 관련 메트릭들
+        """
+        # 텐서를 numpy로 변환
+        if torch.is_tensor(cls_embeddings):
+            cls_embeddings = cls_embeddings.detach().cpu().numpy()
+            
+        # 계층적 클러스터링 수행
+        linkage_matrix = linkage(cls_embeddings, method='ward')
+        
+        # 최적의 클러스터 수 또는 거리 임계값 결정
+        if self.distance_threshold is None:
+            self.distance_threshold = self._find_optimal_threshold(linkage_matrix)
+            
+        # 클러스터 할당
+        cluster_labels = fcluster(linkage_matrix, 
+                                t=self.distance_threshold, 
+                                criterion='distance')
+        
+        # 클러스터 중심 계산
+        n_clusters = len(np.unique(cluster_labels))
+        cluster_centers = np.zeros((n_clusters, cls_embeddings.shape[1]))
+        for i in range(n_clusters):
+            mask = (cluster_labels == i + 1)  # fcluster는 1부터 시작
+            if np.any(mask):
+                cluster_centers[i] = cls_embeddings[mask].mean(axis=0)
+                
+        # 클러스터링 품질 평가
+        if n_clusters > 1:
+            silhouette_avg = silhouette_score(cls_embeddings, cluster_labels)
+        else:
+            silhouette_avg = 0
+            
+        # 덴드로그램 시각화
+        self._plot_dendrogram(linkage_matrix, epoch)
+        
+        # 클러스터 크기 분포 시각화
+        self._plot_cluster_sizes(cluster_labels, epoch)
 
+        cophenetic_corr, p_value = cophenet(linkage_matrix, pdist(cls_embeddings))
+
+        clustering_metrics = {
+            'n_clusters': n_clusters,
+            'silhouette_score': silhouette_avg,
+            'cluster_sizes': [np.sum(cluster_labels == i + 1) for i in range(n_clusters)],
+            'distance_threshold': self.distance_threshold,
+            'cophenetic_correlation': cophenetic_corr,
+            'cophenetic_p_value': p_value
+        }
+        
+        return cluster_centers, clustering_metrics
+        
+    def _find_optimal_threshold(self, linkage_matrix):
+        """
+        클러스터 간 거리의 급격한 변화를 찾아 최적의 임계값 결정
+        """
+        # 연속된 거리 간의 차이 계산
+        distances = linkage_matrix[:, 2]
+        diffs = np.diff(distances)
+        
+        # 거리 차이가 가장 큰 지점 찾기 (elbow method)
+        threshold_idx = np.argmax(diffs) + 1
+        return distances[threshold_idx]
+    
+    def _plot_dendrogram(self, linkage_matrix, epoch):
+        """덴드로그램 시각화"""
+        plt.figure(figsize=(15, 7))
+        dendrogram(linkage_matrix)
+        plt.title('Hierarchical Clustering Dendrogram')
+        plt.xlabel('Sample Index')
+        plt.ylabel('Distance')
+        
+        # 최적 임계값 표시
+        plt.axhline(y=self.distance_threshold, color='r', linestyle='--', 
+                   label=f'Distance Threshold: {self.distance_threshold:.2f}')
+        plt.legend()
+        
+        # 저장
+        save_path = f'/home1/rldnjs16/graph_anomaly_detection/hierarchical_clustering/dendrogram_epoch_{epoch}.png'
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path)
+        plt.close()
+        
+    def _plot_cluster_sizes(self, cluster_labels, epoch):
+        """클러스터 크기 분포 시각화"""
+        unique_labels, counts = np.unique(cluster_labels, return_counts=True)
+        
+        plt.figure(figsize=(10, 5))
+        plt.bar(range(len(counts)), counts)
+        plt.title('Cluster Size Distribution')
+        plt.xlabel('Cluster Index')
+        plt.ylabel('Number of Samples')
+        
+        # 저장
+        save_path = f'/home1/rldnjs16/graph_anomaly_detection/hierarchical_clustering/cluster_sizes_epoch_{epoch}.png'
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path)
+        plt.close()
+
+
+# perform_clustering 함수 수정
+def perform_clustering(train_cls_outputs, random_seed, epoch):
+    analyzer = HierarchicalClusterAnalyzer()
+    cluster_centers, clustering_metrics = analyzer.fit_predict(train_cls_outputs, epoch)
+    
+    # wandb에 메트릭 기록
+    # wandb.log({
+    #     'n_clusters': clustering_metrics['n_clusters'],
+    #     'silhouette_score': clustering_metrics['silhouette_score'],
+    #     'distance_threshold': clustering_metrics['distance_threshold'],
+    #     'cluster_sizes': clustering_metrics['cluster_sizes'],
+    #     'epoch': epoch
+    # })
+
+    return cluster_centers, clustering_metrics
+
+            
 #%%
 # GRAPH_AUTOENCODER 클래스 수정
 class GRAPH_AUTOENCODER(nn.Module):
@@ -1144,7 +1030,6 @@ current_time_ = time.localtime()
 current_time = time.strftime("%Y_%m_%d_%H_%M", current_time_)
 print(f'random number saving: {current_time}')
 
-
 # %%
 '''RUN'''
 def run(dataset_name, random_seed, dataset_AN, trial, device=device, epoch_results=None):
@@ -1194,41 +1079,15 @@ def run(dataset_name, random_seed, dataset_AN, trial, device=device, epoch_resul
 
         pretrain_params = list(model.encoder.parameters())
         bert_optimizer = torch.optim.Adam(pretrain_params, lr=learning_rate)
-        bert_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(bert_optimizer, mode='min', factor=0.5, patience=1000, verbose=True)
-
-        # OneCycleLR 스케줄러 사용 (warm-up과 유사한 효과)
-        bert_scheduler = torch.optim.lr_scheduler.OneCycleLR(
-            bert_optimizer,
-            max_lr=learning_rate,
-            epochs=BERT_epochs,
-            steps_per_epoch=len(train_loader),
-            pct_start=0.1,  # 10% 구간을 warm-up에 사용
-            anneal_strategy='cos'
-        )
-        # bert_scheduler = ReduceLROnPlateau(bert_optimizer, mode='min', factor=factor, patience=patience)
-    
+        
         for epoch in range(1, BERT_epochs+1):
             train_loss, num_sample = train_bert_embedding(
-                model, train_loader, bert_optimizer, bert_scheduler, device
+                model, train_loader, bert_optimizer, device
             )
-            bert_scheduler.step(train_loss)
             
             if epoch % log_interval == 0:
                 print(f'BERT Training Epoch {epoch}: Loss = {train_loss:.4f}')
         
-                current_lr = bert_optimizer.param_groups[0]['lr']
-                print(f'BERT Training Epoch {epoch}: Loss = {train_loss:.4f}, LR = {current_lr:.6f}')
-        
-        
-        # for epoch in range(1, BERT_epochs+1):
-        #     train_adj_loss, num_sample_ = train_bert_embedding_(
-        #         model, train_loader, bert_optimizer, device
-        #     )
-        #     # bert_scheduler.step(train_loss)
-            
-        #     if epoch % log_interval == 0:
-        #         print(f'BERT Edge Training Epoch {epoch}: Loss = {train_adj_loss:.4f}')
-                      
         # 학습된 BERT 저장
         print("Saving pretrained BERT...")
         torch.save(model.encoder.state_dict(), bert_save_path)
@@ -1244,14 +1103,19 @@ def run(dataset_name, random_seed, dataset_AN, trial, device=device, epoch_resul
         info_train = 'Epoch {:3d}, Loss {:.4f}'.format(epoch, train_loss)
 
         if epoch % log_interval == 0:
-            # kmeans, cluster_centers = perform_clustering(train_cls_outputs, random_seed, n_clusters=n_cluster)
-            # cluster_centers = cluster_centers.reshape(-1, hidden_dims[-1])
+            cluster_centers, clustering_metrics = perform_clustering(train_cls_outputs, random_seed, epoch)
 
-            spectral_embedder, cluster_centers = perform_clustering(train_cls_outputs, random_seed, n_clusters=n_cluster, gamma_clusters=gamma_cluster)
-            # cluster_centers = cluster_centers.reshape(-1, hidden_dims[-1])
-            
-            auroc, auprc, precision, recall, f1, test_loss, test_loss_anomaly, visualization_data = evaluate_model(model, test_loader, cluster_centers, n_cluster, gamma_cluster, random_seed, device)
-            
+            print(f"\nClustering Analysis Results (Epoch {epoch}):")
+            print(f"Number of clusters: {clustering_metrics['n_clusters']}")
+            print(f"Silhouette Score: {clustering_metrics['silhouette_score']:.4f}")
+            print(f"Distance threshold: {clustering_metrics['distance_threshold']:.4f}")
+            print(f"cophenetic_correlation: {clustering_metrics['cophenetic_correlation']:.4f}")
+            print("cophenetic_p_value", clustering_metrics['cophenetic_p_value'])
+            print("Cluster sizes:", clustering_metrics['cluster_sizes'])
+
+            # auroc, auprc, precision, recall, f1, test_loss, test_loss_anomaly, visualization_data = evaluate_model(model, test_loader, max_nodes, cluster_centers, device)
+            auroc, auprc, precision, recall, f1, test_loss, test_loss_anomaly, visualization_data = evaluate_model(model, test_loader, cluster_centers, device)
+
             save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/json/{dataset_name}/error_distribution_epoch_{epoch}_fold_{trial}.json'
             # save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/json/{dataset_name}2/error_distribution_epoch_{epoch}_fold_{trial}.json'
             with open(save_path, 'w') as f:
@@ -1275,8 +1139,8 @@ def run(dataset_name, random_seed, dataset_AN, trial, device=device, epoch_resul
                 epoch_results[epoch]['f1s'].append(f1)
             
             # run() 함수 내에서 평가 시점에 다음 코드 추가
-            cls_embeddings_pca, explained_variance_ratio, eigenvalues = analyze_cls_embeddings(model, test_loader, device)
-            
+            cls_embeddings_pca, explained_variance_ratio, eigenvalues = analyze_cls_embeddings(model, test_loader, epoch, device)
+
     return auroc, epoch_results, cls_embeddings_pca, explained_variance_ratio, eigenvalues
 
 
@@ -1353,609 +1217,47 @@ if __name__ == '__main__':
 
 
 #%%
-# base_dir = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/json/{dataset_name}/'
 base_dir = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/json/{dataset_name}_rand_18034064/'
 
-trial = 0
-for epoch in range(1, epochs + 1):    
-    if epoch % log_interval == 0:
-        with open(base_dir + f'error_distribution_epoch_{epoch}_fold_{trial}.json', 'r') as f:
-            data = json.load(f)
+for trial in range(n_cross_val):    
+    for epoch in range(1, epochs + 1):    
+        if epoch % log_interval == 0:
+            with open(base_dir + f'error_distribution_epoch_{epoch}_fold_{trial}.json', 'r') as f:
+                data = json.load(f)
 
-        # 데이터 추출
-        normal_recon = [point['reconstruction'] for point in data['normal']]
-        normal_cluster = [point['clustering'] for point in data['normal']]
-        anomaly_recon = [point['reconstruction'] for point in data['anomaly']]
-        anomaly_cluster = [point['clustering'] for point in data['anomaly']]
+            # 데이터 추출
+            normal_recon = [point['reconstruction'] for point in data['normal']]
+            normal_cluster = [point['clustering'] for point in data['normal']]
+            anomaly_recon = [point['reconstruction'] for point in data['anomaly']]
+            anomaly_cluster = [point['clustering'] for point in data['anomaly']]
 
-        # 산점도 그리기
-        plt.figure(figsize=(10, 6))
-        plt.scatter(normal_recon, normal_cluster, c='blue', label='Normal', alpha=0.6)
-        plt.scatter(anomaly_recon, anomaly_cluster, c='red', label='Anomaly', alpha=0.6)
+            # 두 개의 서브플롯 생성
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 6))
+            
+            # 일반 스케일 플롯
+            ax1.scatter(normal_recon, normal_cluster, c='blue', label='Normal', alpha=0.6)
+            ax1.scatter(anomaly_recon, anomaly_cluster, c='red', label='Anomaly', alpha=0.6)
+            ax1.set_xlabel('Reconstruction Error (node_loss * alpha)')
+            ax1.set_ylabel('Clustering Distance (min_distance * gamma)')
+            ax1.set_title('Error Distribution')
+            ax1.legend()
+            ax1.grid(True)
 
-        # x축과 y축 범위 설정
-        plt.xlim(4, 10)  # x축 범위를 0~10으로 설정
-        plt.ylim(2, 5)   # y축 범위를 0~5로 설정
-        
-        plt.xlabel('Reconstruction Error (node_loss * alpha)')
-        plt.ylabel('Clustering Distance (min_distance * gamma)')
-        plt.title('Error Distribution')
-        plt.legend()
-        plt.grid(True)
+            # 로그 스케일 플롯
+            ax2.scatter(normal_recon, normal_cluster, c='blue', label='Normal', alpha=0.6)
+            ax2.scatter(anomaly_recon, anomaly_cluster, c='red', label='Anomaly', alpha=0.6)
+            ax2.set_xlabel('Reconstruction Error (node_loss * alpha)')
+            ax2.set_ylabel('Clustering Distance (min_distance * gamma)')
+            ax2.set_title('Error Distribution (Log Scale)')
+            ax2.set_xscale('log')
+            ax2.set_yscale('log')
+            ax2.legend()
+            ax2.grid(True)
 
-        # 저장하거나 보여주기
-        plt.savefig(f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/plot/{dataset_name}_rand_18034064/error_distribution_plot_epoch_{epoch}_fold_{trial}.png')  # 파일로 저장
-        # plt.savefig(f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/plot/{dataset_name}2/error_distribution_plot_epoch_{epoch}_fold_{trial}.png')  # 파일로 저장
-        plt.show()  # 직접 보기
-        
-
-# %%
-# current_time_ = time.localtime()
-# current_time = time.strftime("%Y_%m_%d_%H_%M", current_time_)
-# print(f'random number saving: {current_time}')
-
-# save_path = f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/json/{dataset_name}_time_{current_time}/'
-# os.makedirs(os.path.dirname(save_path), exist_ok=True)
-# %%
-import numpy as np
-import matplotlib.pyplot as plt
-from sklearn.cluster import SpectralClustering
-from sklearn.datasets import make_moons
-from sklearn.neighbors import kneighbors_graph
-
-# 1. 데이터 생성
-n_samples = 200
-X, _ = make_moons(n_samples=n_samples, noise=0.1, random_state=42)
-
-# 2. 유사도 행렬 계산 (k-nearest neighbors 방식)
-k = 10
-connectivity = kneighbors_graph(X, n_neighbors=k, include_self=False)
-affinity_matrix = 0.5 * (connectivity + connectivity.T)
-
-# 3. Spectral Clustering 수행
-n_clusters = 2
-clustering = SpectralClustering(
-    n_clusters=n_clusters,
-    affinity='precomputed',
-    random_state=42
-)
-labels = clustering.fit_predict(affinity_matrix.toarray())
-
-# 4. 시각화
-plt.figure(figsize=(12, 4))
-
-# 4.1 원본 데이터
-plt.subplot(121)
-plt.scatter(X[:, 0], X[:, 1], c='gray', alpha=0.5)
-plt.title('Original Data')
-
-# 4.2 클러스터링 결과
-plt.subplot(122)
-plt.scatter(X[:, 0], X[:, 1], c=labels, cmap='viridis')
-plt.title('Spectral Clustering Results')
-
-# 결과 표시
-plt.tight_layout()
-plt.show()
-
-# 5. 클러스터별 통계
-for i in range(n_clusters):
-    cluster_points = X[labels == i]
-    print(f"\nCluster {i} Statistics:")
-    print(f"Number of points: {len(cluster_points)}")
-    print(f"Centroid: {cluster_points.mean(axis=0)}")
-    print(f"Standard deviation: {cluster_points.std(axis=0)}")
-    
-    
-#%%
-def visualize_molecule_graph(x, edge_index, node_label, batch=None, node_idx=1, title="Molecular Graph Structure"):
-    """
-    노드 라벨에 따라 다른 색상으로 분자 구조 스타일의 그래프를 시각화하는 함수
-    
-    Parameters:
-    -----------
-    x : torch.Tensor
-        노드 특성을 포함하는 텐서 [num_nodes, num_features]
-    edge_index : torch.Tensor
-        엣지 정보를 포함하는 텐서 [2, num_edges]
-    node_label : torch.Tensor
-        노드 라벨 정보를 포함하는 텐서 [num_nodes]
-    batch : torch.Tensor, optional
-        배치 정보를 포함하는 텐서
-    node_idx : int
-        시각화할 그래프의 인덱스 (배치가 있는 경우)
-    title : str
-        그래프 제목
-    """
-    # CUDA 텐서를 CPU로 이동
-    x = x.cpu()
-    edge_index = edge_index.cpu()
-    node_label = node_label.cpu()
-    if batch is not None:
-        batch = batch.cpu()
-    
-    # 배치가 있는 경우 특정 그래프만 선택
-    if batch is not None:
-        mask = batch == node_idx
-        sub_x = x[mask]
-        sub_label = node_label[mask]
-        
-        # 노드 매핑 생성 (전체 인덱스 → 서브그래프 인덱스)
-        node_idx_list = torch.where(mask)[0]
-        node_mapper = {int(idx): i for i, idx in enumerate(node_idx_list)}
-        
-        # edge_index 필터링
-        row, col = edge_index
-        mask_edge = (batch[row] == node_idx) & (batch[col] == node_idx)
-        
-        # edge_index의 노드 번호를 새로운 인덱스로 매핑
-        filtered_row = row[mask_edge]
-        filtered_col = col[mask_edge]
-        
-        mapped_row = torch.tensor([node_mapper[int(idx)] for idx in filtered_row])
-        mapped_col = torch.tensor([node_mapper[int(idx)] for idx in filtered_col])
-        
-        sub_edge_index = torch.stack([mapped_row, mapped_col])
-    else:
-        sub_x = x
-        sub_label = node_label
-        sub_edge_index = edge_index
-
-    # NetworkX 그래프 생성
-    G = nx.Graph()
-    
-    # 노드 추가 (라벨 정보 포함)
-    for i in range(len(sub_x)):
-        G.add_node(i, label=int(sub_label[i]))
-    
-    # 엣지 추가
-    edges = sub_edge_index.t().detach().numpy()
-    G.add_edges_from(edges)
-
-    # 그래프 레이아웃 설정
-    pos = nx.kamada_kawai_layout(G)
-    
-    # Figure 설정
-    plt.figure(figsize=(10, 10), facecolor='white')
-    
-    # 실제 라벨 값 가져오기
-    unique_labels = sorted(list(set([G.nodes[node]['label'] for node in G.nodes()])))
-    
-    # 라벨별 색상 매핑 설정
-    color_map = plt.cm.get_cmap('tab10')(np.linspace(0, 1, len(unique_labels)))
-    label_color_dict = {label: color_map[i] for i, label in enumerate(unique_labels)}
-    
-    # 각 노드의 라벨에 따른 색상 리스트 생성
-    node_colors = [label_color_dict[G.nodes[node]['label']] for node in G.nodes()]
-    
-    # 노드 그리기 (원자 스타일)
-    nx.draw_networkx_nodes(G, pos, 
-                          node_color=node_colors,
-                          node_size=1500,
-                          edgecolors='black',
-                          linewidths=2)
-    
-    # 엣지 그리기 (결합 스타일)
-    nx.draw_networkx_edges(G, pos,
-                          edge_color='gray',
-                          width=2,
-                          alpha=0.8)
-    
-    # 실제 라벨 값으로 범례 추가
-    legend_elements = [plt.Line2D([0], [0], marker='o', color='w', 
-                                 markerfacecolor=label_color_dict[label], 
-                                 markersize=15,
-                                 label=str(label))
-                      for label in unique_labels]
-    plt.legend(handles=legend_elements, title="Node Labels", 
-              loc='center left', bbox_to_anchor=(1, 0.5))
-    
-    plt.title(f"{title} (Graph {node_idx})", fontsize=16, pad=20)
-    plt.axis('off')
-    
-    # 여백 조정 - 범례가 잘리지 않도록 오른쪽 여백 확보
-    plt.tight_layout()
-    plt.subplots_adjust(right=0.85)
-    
-    return plt.gcf()
+            plt.tight_layout()
+            plt.savefig(f'/root/default/GRAPH_ANOMALY_DETECTION/graph_anomaly_detection/error_distribution_plot/plot/{dataset_name}_rand_18034064/error_distribution_plot_epoch_{epoch}_fold_{trial}.png')  # 파일로 저장
+            plt.close()
 
 
-# %%
-fig = visualize_molecule_graph(x, edge_index, node_label, batch, node_idx=3)
-plt.show()
-
-# %%
-def visualize_2d(x, edge_index, batch=None, node_label=None, node_idx=1, color='skyblue', edge_color='blue', title="Graph Visualization"):
-    """
-    PyTorch Geometric 데이터를 시각화하는 함수
-    
-    Parameters:
-    -----------
-    x : torch.Tensor
-        노드 특성을 포함하는 텐서 [num_nodes, num_features]
-    edge_index : torch.Tensor
-        엣지 정보를 포함하는 텐서 [2, num_edges]
-    batch : torch.Tensor, optional
-        배치 정보를 포함하는 텐서
-    node_label : torch.Tensor, optional
-        노드 라벨 정보를 포함하는 텐서 [num_nodes]
-    node_idx : int
-        시각화할 그래프의 인덱스 (배치가 있는 경우)
-    color : str
-        노드 색상
-    edge_color : str
-        엣지 색상
-    title : str
-        그래프 제목
-    """
-    # CUDA 텐서를 CPU로 이동
-    x = x.cpu()
-    edge_index = edge_index.cpu()
-    if batch is not None:
-        batch = batch.cpu()
-    if node_label is not None:
-        node_label = node_label.cpu()
-    
-    # 배치가 있는 경우 특정 그래프만 선택
-    if batch is not None:
-        mask = batch == node_idx
-        sub_x = x[mask]
-        if node_label is not None:
-            sub_label = node_label[mask]
-        
-        # 노드 매핑 생성
-        node_idx_list = torch.where(mask)[0]
-        node_mapper = {int(idx): i for i, idx in enumerate(node_idx_list)}
-        
-        # edge_index 필터링
-        row, col = edge_index
-        mask_edge = (batch[row] == node_idx) & (batch[col] == node_idx)
-        filtered_row = row[mask_edge]
-        filtered_col = col[mask_edge]
-        
-        # 새로운 인덱스로 매핑
-        mapped_row = torch.tensor([node_mapper[int(idx)] for idx in filtered_row])
-        mapped_col = torch.tensor([node_mapper[int(idx)] for idx in filtered_col])
-        sub_edge_index = torch.stack([mapped_row, mapped_col])
-    else:
-        sub_x = x
-        sub_edge_index = edge_index
-        sub_label = node_label if node_label is not None else None
-    
-    # PyTorch Geometric Data 객체 생성
-    data = Data(x=sub_x, edge_index=sub_edge_index)
-    
-    # networkx 그래프로 변환
-    G = to_networkx(data, to_undirected=True)
-    
-    # Figure 설정
-    plt.figure(figsize=(10, 10), facecolor='white')
-    
-    # 노드 색상 설정 (node_label이 있는 경우 라벨에 따라 다른 색상 사용)
-    if node_label is not None:
-        unique_labels = sorted(list(set(sub_label.tolist())))
-        colors = plt.cm.tab10(np.linspace(0, 1, len(unique_labels)))
-        color_dict = {label: colors[i] for i, label in enumerate(unique_labels)}
-        node_colors = [color_dict[int(sub_label[i])] for i in range(len(sub_x))]
-    else:
-        node_colors = color
-    
-    # 그래프 그리기
-    nx.draw_networkx(G, 
-                     pos=nx.spring_layout(G, seed=42),
-                     with_labels=True,
-                     node_color=node_colors,
-                     edge_color=edge_color,
-                     node_size=500,
-                     font_size=10,
-                     font_weight='bold',
-                     width=2,
-                     alpha=0.9)
-    
-    plt.title(f"{title} (Graph {node_idx})", fontsize=16, pad=20)
-    plt.axis('off')
-    
-    # 노드 라벨이 있는 경우 범례 추가 (정수형으로 표시)
-    if node_label is not None:
-        legend_elements = [plt.Line2D([0], [0], marker='o', color='w',
-                                    markerfacecolor=color_dict[label],
-                                    markersize=10,
-                                    label=int(label))  # 정수형으로 변환
-                          for label in unique_labels]
-        plt.legend(handles=legend_elements,
-                  title="Node Labels",
-                  loc='center left',
-                  bbox_to_anchor=(1, 0.5))
-        plt.subplots_adjust(right=0.85)
-    
-    return plt.gcf()
-
-
-# %%
-fig = visualize(x, edge_index, batch, node_idx=1)
-plt.show()
-
-# 노드 라벨을 사용한 시각화
-fig = visualize(x, edge_index, batch, node_label, node_idx=1)
-plt.show()
-
-# 커스텀 색상을 사용한 시각화
-fig = visualize(x, edge_index, batch, color='lightgreen', edge_color='darkgreen', node_idx=1)
-plt.show()
-
-#%%
-
-def visualize_3d(x, edge_index, batch=None, node_label=None, node_idx=1, color='skyblue', 
-                edge_color='blue', title="3D Graph Visualization"):
-    """
-    PyTorch Geometric 데이터를 3D로 시각화하는 함수
-    
-    Parameters:
-    -----------
-    x : torch.Tensor
-        노드 특성을 포함하는 텐서 [num_nodes, num_features]
-    edge_index : torch.Tensor
-        엣지 정보를 포함하는 텐서 [2, num_edges]
-    batch : torch.Tensor, optional
-        배치 정보를 포함하는 텐서
-    node_label : torch.Tensor, optional
-        노드 라벨 정보를 포함하는 텐서 [num_nodes]
-    node_idx : int
-        시각화할 그래프의 인덱스 (배치가 있는 경우)
-    """
-    # CUDA 텐서를 CPU로 이동
-    x = x.cpu()
-    edge_index = edge_index.cpu()
-    if batch is not None:
-        batch = batch.cpu()
-    if node_label is not None:
-        node_label = node_label.cpu()
-    
-    # 배치가 있는 경우 특정 그래프만 선택
-    if batch is not None:
-        mask = batch == node_idx
-        sub_x = x[mask]
-        if node_label is not None:
-            sub_label = node_label[mask]
-        
-        node_idx_list = torch.where(mask)[0]
-        node_mapper = {int(idx): i for i, idx in enumerate(node_idx_list)}
-        
-        row, col = edge_index
-        mask_edge = (batch[row] == node_idx) & (batch[col] == node_idx)
-        filtered_row = row[mask_edge]
-        filtered_col = col[mask_edge]
-        
-        mapped_row = torch.tensor([node_mapper[int(idx)] for idx in filtered_row])
-        mapped_col = torch.tensor([node_mapper[int(idx)] for idx in filtered_col])
-        sub_edge_index = torch.stack([mapped_row, mapped_col])
-    else:
-        sub_x = x
-        sub_edge_index = edge_index
-        sub_label = node_label if node_label is not None else None
-    
-    # PyTorch Geometric Data 객체 생성
-    data = Data(x=sub_x, edge_index=sub_edge_index)
-    
-    # networkx 그래프로 변환
-    G = to_networkx(data, to_undirected=True)
-    
-    # 3D 레이아웃 생성
-    pos = nx.spring_layout(G, dim=3, seed=42)
-    
-    # Figure 설정
-    fig = plt.figure(figsize=(12, 12), facecolor='white')
-    ax = fig.add_subplot(111, projection='3d')
-    
-    # 노드 색상 설정
-    if node_label is not None:
-        unique_labels = sorted(list(set(sub_label.tolist())))
-        colors = plt.cm.tab10(np.linspace(0, 1, len(unique_labels)))
-        color_dict = {label: colors[i] for i, label in enumerate(unique_labels)}
-        node_colors = [color_dict[int(sub_label[i])] for i in range(len(sub_x))]
-    else:
-        node_colors = [color] * G.number_of_nodes()
-    
-    # 노드 위치 추출
-    node_xyz = np.array([pos[v] for v in sorted(G.nodes())])
-    
-    # 엣지 위치 추출
-    edge_xyz = np.array([(pos[u], pos[v]) for u, v in G.edges()])
-
-    # 노드 그리기
-    ax.scatter(node_xyz[:, 0], node_xyz[:, 1], node_xyz[:, 2], 
-              c=node_colors, s=200, alpha=0.9)
-
-    # 엣지 그리기
-    for vizedge in edge_xyz:
-        ax.plot(*vizedge.T, color=edge_color, alpha=0.5)
-
-    # 노드 번호 표시
-    for i, (x, y, z) in enumerate(node_xyz):
-        ax.text(x, y, z, str(i), fontsize=8, fontweight='bold')
-    
-    # 범례 추가 (노드 라벨이 있는 경우)
-    if node_label is not None:
-        legend_elements = [plt.Line2D([0], [0], marker='o', color='w',
-                                    markerfacecolor=color_dict[label],
-                                    markersize=10,
-                                    label=int(label))
-                          for label in unique_labels]
-        ax.legend(handles=legend_elements,
-                 title="Node Labels",
-                 loc='center left',
-                 bbox_to_anchor=(1.1, 0.5))
-    
-    # 축 레이블과 제목 설정
-    ax.set_xlabel('X')
-    ax.set_ylabel('Y')
-    ax.set_zlabel('Z')
-    plt.title(f"{title} (Graph {node_idx})", fontsize=16, pad=20)
-    
-    # 보기 각도 설정
-    ax.view_init(elev=20, azim=45)
-    
-    # 여백 조정
-    plt.tight_layout()
-    
-    return fig
-
-# 시각화 방법을 전환할 수 있는 함수
-def visualize(x, edge_index, batch=None, node_label=None, node_idx=1, 
-             color='skyblue', edge_color='blue', title="Graph Visualization", 
-             mode='2d'):
-    """
-    2D 또는 3D 시각화를 선택할 수 있는 함수
-    
-    Parameters:
-    -----------
-    mode : str
-        '2d' 또는 '3d' 선택
-    """
-    if mode == '3d':
-        return visualize_3d(x, edge_index, batch, node_label, node_idx, 
-                          color, edge_color, title)
-    else:
-        # 기존의 2D 시각화 코드 사용
-        return visualize_2d(x, edge_index, batch, node_label, node_idx, 
-                          color, edge_color, title)
-# %%
-fig = visualize(x, edge_index, batch, node_label, node_idx=10, mode='3d')
-plt.show()
-
-# %%
-import plotly.graph_objects as go
-
-def visualize_3d_interactive(x, edge_index, batch=None, node_label=None, node_idx=1, title="Interactive 3D Graph"):
-    """
-    PyTorch Geometric 데이터를 인터랙티브 3D로 시각화하는 함수
-    마우스로 자유롭게 회전, 확대/축소, 이동이 가능합니다.
-    
-    Parameters:
-    -----------
-    x : torch.Tensor
-        노드 특성을 포함하는 텐서 [num_nodes, num_features]
-    edge_index : torch.Tensor
-        엣지 정보를 포함하는 텐서 [2, num_edges]
-    batch : torch.Tensor, optional
-        배치 정보를 포함하는 텐서
-    node_label : torch.Tensor, optional
-        노드 라벨 정보를 포함하는 텐서 [num_nodes]
-    node_idx : int
-        시각화할 그래프의 인덱스 (배치가 있는 경우)
-    title : str
-        그래프 제목
-    """
-    # CUDA 텐서를 CPU로 이동
-    x = x.cpu()
-    edge_index = edge_index.cpu()
-    if batch is not None:
-        batch = batch.cpu()
-    if node_label is not None:
-        node_label = node_label.cpu()
-    
-    # 배치 처리
-    if batch is not None:
-        mask = batch == node_idx
-        sub_x = x[mask]
-        if node_label is not None:
-            sub_label = node_label[mask]
-        
-        node_idx_list = torch.where(mask)[0]
-        node_mapper = {int(idx): i for i, idx in enumerate(node_idx_list)}
-        
-        row, col = edge_index
-        mask_edge = (batch[row] == node_idx) & (batch[col] == node_idx)
-        filtered_row = row[mask_edge]
-        filtered_col = col[mask_edge]
-        
-        mapped_row = torch.tensor([node_mapper[int(idx)] for idx in filtered_row])
-        mapped_col = torch.tensor([node_mapper[int(idx)] for idx in filtered_col])
-        sub_edge_index = torch.stack([mapped_row, mapped_col])
-    else:
-        sub_x = x
-        sub_edge_index = edge_index
-        sub_label = node_label if node_label is not None else None
-
-    # NetworkX 그래프로 변환
-    G = to_networkx(Data(x=sub_x, edge_index=sub_edge_index), to_undirected=True)
-    
-    # 3D 레이아웃 생성
-    pos = nx.spring_layout(G, dim=3, seed=42)
-    
-    # 노드 위치 추출
-    Xn = [pos[k][0] for k in G.nodes()]
-    Yn = [pos[k][1] for k in G.nodes()]
-    Zn = [pos[k][2] for k in G.nodes()]
-
-    # 엣지 위치 추출 (각 엣지를 선으로 표현하기 위해 None을 추가)
-    Xe, Ye, Ze = [], [], []
-    for e in G.edges():
-        Xe.extend([pos[e[0]][0], pos[e[1]][0], None])
-        Ye.extend([pos[e[0]][1], pos[e[1]][1], None])
-        Ze.extend([pos[e[0]][2], pos[e[1]][2], None])
-    
-    # 노드 색상 설정
-    if node_label is not None:
-        unique_labels = sorted(list(set(sub_label.tolist())))
-        colors = [f'rgb({int(r*255)},{int(g*255)},{int(b*255)})' 
-                 for r, g, b, _ in plt.cm.tab10(np.linspace(0, 1, len(unique_labels)))]
-        node_colors = [colors[unique_labels.index(int(sub_label[i]))] for i in range(len(sub_x))]
-    else:
-        node_colors = ['skyblue'] * G.number_of_nodes()
-
-    # 트레이스 생성
-    edge_trace = go.Scatter3d(
-        x=Xe, y=Ye, z=Ze,
-        mode='lines',
-        line=dict(color='gray', width=2),
-        hoverinfo='none'
-    )
-    
-    node_trace = go.Scatter3d(
-        x=Xn, y=Yn, z=Zn,
-        mode='markers+text',
-        marker=dict(
-            size=15,
-            color=node_colors,
-            line=dict(color='black', width=1)
-        ),
-        text=[str(i) for i in range(len(Xn))],  # 노드 번호
-        hoverinfo='text'
-    )
-    
-    # 레이아웃 설정
-    layout = go.Layout(
-        title=f'{title} (Graph {node_idx})',
-        showlegend=False,
-        scene=dict(
-            xaxis=dict(showbackground=False, showgrid=False, zeroline=False, showticklabels=False),
-            yaxis=dict(showbackground=False, showgrid=False, zeroline=False, showticklabels=False),
-            zaxis=dict(showbackground=False, showgrid=False, zeroline=False, showticklabels=False)
-        ),
-        margin=dict(l=0, r=0, t=40, b=0),
-        hovermode='closest'
-    )
-    
-    # Figure 생성
-    fig = go.Figure(data=[edge_trace, node_trace], layout=layout)
-    
-    # 노드 라벨이 있는 경우 범례 추가
-    if node_label is not None:
-        # 범례를 위한 더미 트레이스 추가
-        for label, color in zip(unique_labels, colors):
-            fig.add_trace(go.Scatter3d(
-                x=[None], y=[None], z=[None],
-                mode='markers',
-                marker=dict(size=10, color=color),
-                showlegend=True,
-                name=f'Label {int(label)}'
-            ))
-    
-    return fig
-
-# %%
-fig = visualize_3d_interactive(x, edge_index, batch, node_label)
-fig.show()  # 브라우저에서 열림
 
 # %%
