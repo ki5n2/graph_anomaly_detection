@@ -272,8 +272,9 @@ def train(model, train_loader, recon_optimizer, max_nodes, device):
             cls_loss = torch.tensor(0.0, device=device)
                 
         # Total Loss (alpha는 CLS 손실의 가중치)
-        alpha = 10.0  # 이 값은 조정 가능
-        cls_loss = alpha * cls_loss
+        alpha_ = 10.0  # 이 값은 조정 가능
+        cls_loss = alpha_ * cls_loss
+        
         loss = recon_loss + cls_loss
             
         num_sample += num_graphs

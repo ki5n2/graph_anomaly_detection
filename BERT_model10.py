@@ -108,11 +108,11 @@ def train(model, train_loader, recon_optimizer, device, epoch):
         
         train_cls_outputs, x_recon, stats_pred = model(x, edge_index, batch, num_graphs)
         
-        # if epoch % 5 == 0:
-        #     cls_outputs_np = train_cls_outputs.detach().cpu().numpy()
-        #     kmeans = KMeans(n_clusters=n_cluster, random_state=random_seed)
-        #     kmeans.fit(cls_outputs_np)
-        #     cluster_centers = kmeans.cluster_centers_
+        if epoch % 5 == 0:
+            cls_outputs_np = train_cls_outputs.detach().cpu().numpy()
+            kmeans = KMeans(n_clusters=n_cluster, random_state=random_seed)
+            kmeans.fit(cls_outputs_np)
+            cluster_centers = kmeans.cluster_centers_
             
         loss = 0
         node_loss = 0
@@ -126,15 +126,13 @@ def train(model, train_loader, recon_optimizer, device, epoch):
             
             if epoch % 5 == 0:
                 node_loss_scaled = node_loss_.item() * alpha
-                # cls_vec = train_cls_outputs[i].detach().cpu().numpy()
-                # distances = cdist([cls_vec], cluster_centers, metric='euclidean')
-                # min_distance = distances.min().item() * gamma
-                structure_loss = torch.norm(true_stats[start_node:end_node] - stats_pred[start_node:end_node], p='fro')**2 / num_nodes
-                structure_loss = structure_loss.item() 
+                cls_vec = train_cls_outputs[i].detach().cpu().numpy()
+                distances = cdist([cls_vec], cluster_centers, metric='euclidean')
+                min_distance = distances.min().item() * gamma
                 
                 reconstruction_errors.append({
                     'reconstruction': node_loss_scaled,
-                    'clustering': structure_loss,
+                    'clustering': min_distance,
                     'type': 'train_normal'  # 훈련 데이터는 모두 정상
                 })
             
@@ -186,26 +184,23 @@ def evaluate_model(model, test_loader, cluster_centers, n_clusters, gamma_cluste
                 node_loss = torch.norm(x[start_node:end_node] - x_recon[start_node:end_node], p='fro')**2 / num_nodes
                 node_loss = node_loss.item() * alpha
                 
-                # cls_vec = e_cls_outputs_np[i].reshape(1, -1)
-                # distances = cdist(cls_vec, cluster_centers, metric='euclidean')
-                # min_distance = distances.min().item() * gamma
-                
-                structure_loss = torch.norm(true_stats[i] - stats_pred[i], p='fro')**2 / num_nodes
-                structure_loss = structure_loss.item() * 5
+                cls_vec = e_cls_outputs_np[i].reshape(1, -1)
+                distances = cdist(cls_vec, cluster_centers, metric='euclidean')
+                min_distance = distances.min().item() * gamma
                 
                 # 변환된 값들 저장
                 reconstruction_errors.append({
                     'reconstruction': node_loss,
-                    'clustering': structure_loss,
+                    'clustering': min_distance,
                     'type': 'test_normal' if data.y[i].item() == 0 else 'test_anomaly'
                 })
 
                 # 전체 에러는 변환된 값들의 평균으로 계산
-                recon_error = node_loss + structure_loss              
+                recon_error = node_loss + min_distance              
                 recon_errors.append(recon_error)
                 
                 print(f'test_node_loss: {node_loss}')
-                print(f'test_structure_loss: {structure_loss}')
+                print(f'test_min_distance: {min_distance}')
                 
                 if data.y[i].item() == 0:
                     total_loss_ += recon_error
@@ -257,78 +252,6 @@ def evaluate_model(model, test_loader, cluster_centers, n_clusters, gamma_cluste
 
 
 #%%
-def calculate_homology_features(x, edge_index, batch):
-    """
-    그래프에서 호몰로지 정보를 계산합니다.
-    :param x: 노드 특징 행렬 (N x F)
-    :param edge_index: 엣지 인덱스 (2 x E)
-    :param batch: 각 노드가 속한 그래프의 배치 인덱스 (N)
-    :return: 각 그래프의 호몰로지 정보 (Tensor)
-    """
-    features = []
-    unique_batches = batch.unique()
-    num_nodes = batch.size(0)
-    for graph_id in unique_batches:
-        # 그래프 추출
-        mask = batch == graph_id
-        node_indices = mask.nonzero().squeeze(1)  # Changed this line
-        # node_indices = mask.nonzero(as_tuple=True)[0]
-        
-        # 에러 방지를 위한 디바이스 확인 및 CPU로 이동
-        node_indices = node_indices.cpu()
-        edge_index_cpu = edge_index.cpu()
-        
-        # subgraph 함수 호출 수정
-        sub_edge_index, edge_attr = subgraph(
-            node_indices, 
-            edge_index_cpu,
-            relabel_nodes=True,
-            num_nodes=num_nodes
-        )
-                
-        # NetworkX 그래프로 변환
-        nx_graph = nx.Graph()
-        nx_graph.add_nodes_from(range(len(node_indices)))
-        edge_list = sub_edge_index.t().tolist()
-        nx_graph.add_edges_from(edge_list)
-        
-        # H₀: 연결 성분 개수
-        H0 = nx.number_connected_components(nx_graph)
-        
-        # H₁: 사이클 개수
-        H1 = nx.number_of_edges(nx_graph) - nx.number_of_nodes(nx_graph) + H0
-        
-        # 고리 크기 분포
-        try:
-            cycles = nx.cycle_basis(nx_graph)
-            cycle_sizes = [len(cycle) for cycle in cycles]
-            
-            if len(cycle_sizes) > 0:
-                avg_cycle_size = sum(cycle_sizes) / len(cycle_sizes)
-                max_cycle_size = max(cycle_sizes)
-                min_cycle_size = min(cycle_sizes)
-            else:
-                avg_cycle_size = 0.0
-                max_cycle_size = 0.0
-                min_cycle_size = 0.0
-                
-            # 방향족 고리 비율
-            aromaticity = [len(cycle) == 6 for cycle in cycles]
-            aromatic_ratio = sum(aromaticity) / len(aromaticity) if len(aromaticity) > 0 else 0.0
-            
-        except nx.NetworkXNoCycle:
-            avg_cycle_size = 0.0
-            max_cycle_size = 0.0
-            min_cycle_size = 0.0
-            aromatic_ratio = 0.0
-        
-        # 고정된 크기의 벡터로 변환
-        features.append([H0, H1, avg_cycle_size, max_cycle_size, min_cycle_size, aromatic_ratio])
-    
-    # 결과를 텐서로 변환하여 원래 디바이스로 반환
-    return torch.tensor(features, dtype=torch.float32).to(batch.device)
-
-
 def compute_graph_properties(data, batch):
     properties = []
     for i in range(batch.max() + 1):
@@ -413,7 +336,7 @@ def persistence_stats_loss(pred_stats, true_stats):
 '''ARGPARSER'''
 parser = argparse.ArgumentParser()
 
-parser.add_argument("--dataset-name", type=str, default='COX2')
+parser.add_argument("--dataset-name", type=str, default='NCI1')
 parser.add_argument("--data-root", type=str, default='./dataset')
 parser.add_argument("--assets-root", type=str, default="./assets")
 
@@ -1215,3 +1138,5 @@ if __name__ == '__main__':
             'final_auroc_std': float(np.std(ad_aucs))
         }, f, indent=4)
 
+
+# %%
