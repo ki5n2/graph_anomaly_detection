@@ -60,11 +60,11 @@ import networkx as nx
 '''ARGPARSER'''
 parser = argparse.ArgumentParser()
 
-parser.add_argument("--dataset-name", type=str, default='BZR')
+parser.add_argument("--dataset-name", type=str, default='AIDS')
 parser.add_argument("--data-root", type=str, default='./dataset')
 parser.add_argument("--assets-root", type=str, default="./assets")
 
-parser.add_argument("--epochs", type=int, default=500)
+parser.add_argument("--epochs", type=int, default=100)
 parser.add_argument("--patience", type=int, default=5)
 parser.add_argument("--step-size", type=int, default=20)
 parser.add_argument("--n-cross-val", type=int, default=5)
@@ -210,8 +210,9 @@ class OCGTL(nn.Module):
         )
         
         # Learnable center for OCC
-        self.center = nn.Parameter(torch.zeros(hidden_dim))
-        
+        # self.center = nn.Parameter(torch.zeros(hidden_dim))
+        self.center = nn.Parameter(torch.zeros(hidden_dim).normal_(0, 0.1))
+
         # Temperature parameter for GTL
         self.temperature = 0.1
         
@@ -252,33 +253,36 @@ class OCGTL(nn.Module):
     def loss(self, ref_embedding, trans_embeddings):
         batch_size = ref_embedding.size(0)
         
-        # OCC Loss (eq. 3)
+        # OCC Loss with numerical stability
         occ_loss = sum(
-            torch.norm(embedding - self.center, p=2, dim=1).mean()
+            torch.norm(embedding - self.center, p=2, dim=1).clamp(min=1e-8).mean()
             for embedding in trans_embeddings
         )
         
-        # GTL Loss (eq. 2)
+        # GTL Loss with numerical stability
         gtl_loss = 0
         for k, trans_emb in enumerate(trans_embeddings):
+            # Add small epsilon for numerical stability
+            eps = 1e-8
+            
             # Compute similarities
-            pos_sim = F.cosine_similarity(trans_emb, ref_embedding) / self.temperature
+            pos_sim = (F.cosine_similarity(trans_emb, ref_embedding) + eps) / self.temperature
             
             # Compute similarities with other transformations
             neg_sims = torch.stack([
-                F.cosine_similarity(trans_emb, other_emb) / self.temperature
+                (F.cosine_similarity(trans_emb, other_emb) + eps) / self.temperature
                 for i, other_emb in enumerate(trans_embeddings)
                 if i != k
             ])
             
-            # Compute loss terms
+            # Compute loss terms with stability
             pos_term = torch.exp(pos_sim)
             neg_term = torch.sum(torch.exp(neg_sims), dim=0)
             
-            # Add to GTL loss
-            gtl_loss -= torch.mean(torch.log(pos_term / (pos_term + neg_term)))
+            # Add to GTL loss with log stability
+            gtl_loss -= torch.mean(torch.log(pos_term / (pos_term + neg_term + eps)))
         
-        # Total loss (eq. 1)
+        # Total loss
         total_loss = occ_loss + gtl_loss
         
         return total_loss
@@ -290,18 +294,23 @@ class OCGTL(nn.Module):
         """
         ref_embedding, trans_embeddings = self.forward(x, edge_index, batch)
         
-        # Compute anomaly scores as the average distance to center for all transformations
+        # Compute and stabilize anomaly scores
         scores = torch.stack([
-            torch.norm(embedding - self.center, p=2, dim=1)
+            torch.norm(embedding - self.center, p=2, dim=1).clamp(min=1e-8)  # 숫자 안정성을 위한 clamp
             for embedding in trans_embeddings
-        ]).mean(dim=0)
+        ])
+        
+        # Mean over transformations
+        scores = scores.mean(dim=0)
+        
+        # 추가적인 안정성 체크
+        scores = torch.nan_to_num(scores, nan=1e8)  # NaN을 큰 값으로 대체
         
         return scores
 
 
 #%%
 def train_epoch(model, train_loader, optimizer, device):
-    """Train for one epoch"""
     model.train()
     total_loss = 0
     num_samples = 0
@@ -316,8 +325,9 @@ def train_epoch(model, train_loader, optimizer, device):
         # Compute loss
         loss = model.loss(ref_emb, trans_embs)
         
-        # Backward pass and optimize
+        # Backward pass with gradient clipping
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         
         batch_size = batch.num_graphs
@@ -340,24 +350,37 @@ def test(model, test_loader, device):
         for batch in test_loader:
             batch = batch.to(device)
             
-            # Compute anomaly scores (distance to center only)
-            scores = model.score_samples(batch.x, batch.edge_index, batch.batch)
-            
-            # Forward pass (for monitoring overall loss)
-            ref_emb, trans_embs = model(batch.x, batch.edge_index, batch.batch)
-            loss = model.loss(ref_emb, trans_embs)
-            
-            # Collect results
-            all_scores.extend(scores.cpu().numpy())
-            all_labels.extend(batch.y.cpu().numpy())
-            
-            batch_size = batch.num_graphs
-            total_loss += loss.item() * batch_size
-            num_samples += batch_size
+            try:
+                # Compute anomaly scores
+                scores = model.score_samples(batch.x, batch.edge_index, batch.batch)
+                
+                # Forward pass (for monitoring)
+                ref_emb, trans_embs = model(batch.x, batch.edge_index, batch.batch)
+                loss = model.loss(ref_emb, trans_embs)
+                
+                # Ensure scores are valid
+                scores = scores.cpu().numpy()
+                if np.any(np.isnan(scores)):
+                    scores = np.nan_to_num(scores, nan=np.max(scores[~np.isnan(scores)]) if np.any(~np.isnan(scores)) else 1e8)
+                
+                # Collect results
+                all_scores.extend(scores)
+                all_labels.extend(batch.y.cpu().numpy())
+                
+                batch_size = batch.num_graphs
+                total_loss += loss.item() * batch_size
+                num_samples += batch_size
+                
+            except RuntimeError as e:
+                print(f"Error processing batch: {e}")
+                continue
     
-    # Convert to numpy arrays
+    # Convert to numpy arrays and ensure no NaN values
     all_scores = np.array(all_scores)
     all_labels = np.array(all_labels)
+    
+    # Final sanity check
+    all_scores = np.nan_to_num(all_scores, nan=np.max(all_scores[~np.isnan(all_scores)]) if np.any(~np.isnan(all_scores)) else 1e8)
     
     # Compute metrics
     auroc = roc_auc_score(all_labels, all_scores)
@@ -371,7 +394,6 @@ def test(model, test_loader, device):
         'scores': all_scores,
         'labels': all_labels
     }
-
 
 
 #%%
@@ -422,7 +444,9 @@ def run(dataset_name, random_seed, trial, device, epoch_results=None):
     train_loader = loaders['train']
     test_loader = loaders['test']
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-        
+    # optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)  # 0.001 -> 0.0001
+
+
     for epoch in range(1, epochs+1):
         # Train
         train_loss = train_epoch(model, train_loader, optimizer, device)
@@ -503,4 +527,6 @@ if __name__ == '__main__':
     print('[FINAL RESULTS] ' + results)
     print(f"Total execution time: {total_time:.2f} seconds")
     
-    
+
+
+# %%

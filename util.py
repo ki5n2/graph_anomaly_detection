@@ -674,28 +674,26 @@ def compute_persistence_and_betti(graph_distance_matrix, max_dimension=2):
         # persistence diagram 가져오기
         persistence_diagram = simplex_tree.persistence()
         
-        if persistence_diagram:
-            min_val = min(min(birth, death if death != float('inf') else birth) 
-                         for _, (birth, death) in persistence_diagram)
-            max_val = max(max(birth, death if death != float('inf') else birth) 
-                         for _, (birth, death) in persistence_diagram)
-        else:
-            min_val, max_val = 0.0, 2.0
+        # if persistence_diagram:
+        #     min_val = min(min(birth, death if death != float('inf') else birth) 
+        #                  for _, (birth, death) in persistence_diagram)
+        #     max_val = max(max(birth, death if death != float('inf') else birth) 
+        #                  for _, (birth, death) in persistence_diagram)
+        # else:
+        #     min_val, max_val = 0.0, 2.0
         
-        # Betti Numbers 계산
-        betti_numbers = simplex_tree.persistent_betti_numbers(min_val, max_val)
+        # # Betti Numbers 계산
+        # betti_numbers = simplex_tree.persistent_betti_numbers(min_val, max_val)
         
-        return persistence_diagram, betti_numbers
+        return persistence_diagram
     except Exception as e:
         print(f"Error in persistence computation: {str(e)}")
-        return [], [0, 0, 0]
+        return []
 
 
 def process_batch_graphs(data):
     graphs = split_batch_graphs(data)
     true_stats_list = []
-    
-    print(f"\nProcessing {len(graphs)} graphs...")
     
     for i, (x, edge_index) in enumerate(graphs):
         try:
@@ -703,7 +701,7 @@ def process_batch_graphs(data):
             distance_matrix = squareform(pdist(x.cpu().numpy(), metric='euclidean'))
             
             # Persistent Homology 계산
-            persistence_diagram, betti_numbers = compute_persistence_and_betti(distance_matrix)
+            persistence_diagram = compute_persistence_and_betti(distance_matrix)
             
             # 통계 추출
             stats = {
@@ -715,47 +713,36 @@ def process_batch_graphs(data):
                                            if death != float('inf')]) if persistence_diagram else 0.0,
                 "mean_birth": np.mean([birth for _, (birth, death) in persistence_diagram]) if persistence_diagram else 0.0,
                 "mean_death": np.mean([death for _, (birth, death) in persistence_diagram 
-                                     if death != float('inf')]) if persistence_diagram else 0.0,
-                "betti_0": betti_numbers[0] if len(betti_numbers) > 0 else 0,
-                "betti_1": betti_numbers[1] if len(betti_numbers) > 1 else 0,
-                "betti_2": betti_numbers[2] if len(betti_numbers) > 2 else 0
+                                     if death != float('inf')]) if persistence_diagram else 0.0
             }
             
             true_stats_list.append(stats)
-            
-            if i % 50 == 0:  # 50개 그래프마다 진행상황 출력
-                print(f"Processed {i}/{len(graphs)} graphs")
                 
         except Exception as e:
-            print(f"Error processing graph {i}: {str(e)}")
             true_stats_list.append({
                 "mean_survival": 0.0, "max_survival": 0.0, "variance_survival": 0.0,
-                "mean_birth": 0.0, "mean_death": 0.0,
-                "betti_0": 0, "betti_1": 0, "betti_2": 0
+                "mean_birth": 0.0, "mean_death": 0.0
             })
     
     # 모든 통계를 tensor로 변환
     true_stats_tensor = torch.tensor([
         [stats['mean_survival'], stats['max_survival'], stats['variance_survival'],
-         stats['mean_birth'], stats['mean_death'],
-         stats['betti_0'], stats['betti_1'], stats['betti_2']]
+         stats['mean_birth'], stats['mean_death']]
         for stats in true_stats_list
     ], dtype=torch.float32)
     
     # 데이터에 통계 추가
     data.true_stats = true_stats_tensor
     
-    print("\nProcessing completed!")
-    print(f"Final statistics shape: {data.true_stats.shape}")
+    # print("\nProcessing completed!")
+    # print(f"Final statistics shape: {data.true_stats.shape}")
     
     # 처음 몇 개 그래프의 통계 출력
-    print("\nFirst few graphs statistics:")
-    for i in range(min(3, len(true_stats_list))):
-        print(f"\nGraph {i}:")
-        print(f"Betti numbers: β₀={true_stats_list[i]['betti_0']}, "
-              f"β₁={true_stats_list[i]['betti_1']}, β₂={true_stats_list[i]['betti_2']}")
-        print(f"Mean survival: {true_stats_list[i]['mean_survival']:.4f}")
-        print(f"Max survival: {true_stats_list[i]['max_survival']:.4f}")
+    # print("\nFirst few graphs statistics:")
+    # for i in range(min(3, len(true_stats_list))):
+    #     print(f"\nGraph {i}:")
+    #     print(f"Mean survival: {true_stats_list[i]['mean_survival']:.4f}")
+    #     print(f"Max survival: {true_stats_list[i]['max_survival']:.4f}")
     
     return data
 
