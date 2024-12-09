@@ -53,7 +53,7 @@ from functools import partial
 from multiprocessing import Pool
 
 from module.loss import loss_cal
-from util import set_seed, set_device, EarlyStopping, get_ad_split_TU, get_data_loaders_TU, adj_original, split_batch_graphs, compute_persistence_and_betti, process_batch_graphs
+from util import set_seed, set_device, EarlyStopping, get_ad_split_TU, get_data_loaders_TU, adj_original, split_batch_graphs, compute_persistence_and_betti, process_batch_graphs, get_ad_dataset_Tox21
 
 import networkx as nx
 
@@ -630,6 +630,8 @@ def run(dataset_name, random_seed, trial, device, epoch_results=None):
     
     return auroc, epoch_results
 
+
+#%%
 if __name__ == '__main__':
     ad_aucs = []
     fold_times = []
@@ -688,4 +690,353 @@ if __name__ == '__main__':
     print(f"Total execution time: {total_time:.2f} seconds")
 
 
+
+
+
+
+
+
+# %%
+parser = argparse.ArgumentParser()
+
+parser.add_argument("--dataset-name", type=str, default='Tox21_MMP')
+parser.add_argument("--data-root", type=str, default='./dataset')
+parser.add_argument("--assets-root", type=str, default="./assets")
+
+parser.add_argument("--epochs", type=int, default=100)
+parser.add_argument("--patience", type=int, default=5)
+parser.add_argument("--step-size", type=int, default=20)
+parser.add_argument("--n-cross-val", type=int, default=5)
+parser.add_argument("--random-seed", type=int, default=2)
+parser.add_argument("--batch-size", type=int, default=128)
+parser.add_argument("--log-interval", type=int, default=5)
+parser.add_argument("--n-test-anomaly", type=int, default=400)
+parser.add_argument("--test-batch-size", type=int, default=128)
+parser.add_argument("--hidden-dims", nargs='+', type=int, default=[256])
+
+parser.add_argument("--factor", type=float, default=0.5)
+parser.add_argument("--test-size", type=float, default=0.25)
+parser.add_argument("--dropout-rate", type=float, default=0.1)
+parser.add_argument("--weight-decay", type=float, default=0.0001)
+parser.add_argument("--learning-rate", type=float, default=0.0001)
+
+parser.add_argument("--alpha", type=float, default=1.0)
+parser.add_argument("--beta", type=float, default=0.05)
+parser.add_argument("--gamma", type=float, default=0.1)
+parser.add_argument("--gamma-cluster", type=float, default=0.5)
+parser.add_argument("--node-theta", type=float, default=0.03)
+parser.add_argument("--adj-theta", type=float, default=0.01)
+
+try:
+    args = parser.parse_args()
+except:
+    args = parser.parse_args([])
+
+
+#%%
+'''OPTIONS'''
+data_root: str = args.data_root
+assets_root: str = args.assets_root
+dataset_name: str = args.dataset_name
+
+epochs: int = args.epochs
+patience: int = args.patience
+step_size: int = args.step_size
+batch_size: int = args.batch_size
+n_cross_val: int = args.n_cross_val
+random_seed: int = args.random_seed
+hidden_dims: list = args.hidden_dims
+log_interval: int = args.log_interval
+n_test_anomaly: int = args.n_test_anomaly
+test_batch_size: int = args.test_batch_size
+
+factor: float = args.factor
+test_size: float = args.test_size
+weight_decay: float = args.weight_decay
+dropout_rate: float = args.dropout_rate
+learning_rate: float = args.learning_rate
+
+alpha: float = args.alpha
+beta: float = args.beta
+gamma: float = args.gamma
+gamma_cluster: float = args.gamma_cluster
+node_theta: float = args.node_theta
+adj_theta: float = args.adj_theta
+
+set_seed(random_seed)
+
+device = set_device()
+# device = torch.device("cpu")
+print(f"Using device: {device}")
+
+torch.set_printoptions(edgeitems=3)  # 텐서 출력시 표시되는 요소 수 조정
+torch.backends.cuda.matmul.allow_tf32 = False  # 더 정확한 연산을 위해 False 설정
+
+# CUDA 디버깅 활성화
+os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
+
+
+#%%
+if dataset_name == 'AIDS' or dataset_name == 'NCI1' or dataset_name == 'DHFR':
+    dataset_AN = True
+else:
+    dataset_AN = False
+
+loaders, meta = get_ad_dataset_Tox21(dataset_name, batch_size, test_batch_size)
+
+num_train = meta['num_train']
+num_features = meta['num_feat']
+max_nodes = meta['max_nodes']
+
+print(f'Number of graphs: {num_train}')
+print(f'Number of features: {num_features}')
+print(f'Max nodes: {max_nodes}')
+
+current_time_ = time.localtime()
+current_time = time.strftime("%Y_%m_%d_%H_%M", current_time_)
+print(f'random number saving: {current_time}')
+
+
+# %%
+def run(dataset_name, random_seed, device=device, epoch_results=None):
+    if epoch_results is None:
+        epoch_results = {}
+    epoch_interval = 10  # 10 에폭 단위로 비교
+    
+    set_seed(random_seed)
+    all_results = []
+
+    loaders, meta = get_ad_dataset_Tox21(dataset_name, batch_size, test_batch_size)
+
+    num_features = meta['num_feat']
+    max_nodes = meta['max_nodes']
+    
+    # Initialize model
+    model = CVTGAD(
+        input_dim=num_features,
+        hidden_dim=32,
+        gnn_type='gin',
+        alpha=1.0
+    ).to(device)
+    
+    train_loader = loaders['train']
+    test_loader = loaders['test']
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    
+    for epoch in range(1, epochs+1):
+        # Train
+        train_loss = train_epoch(model, train_loader, optimizer, device)
+        
+        # Evaluate periodically
+        if epoch % log_interval == 0:
+            # Test
+            test_results = test(model, test_loader, device)
+            auroc, auprc = test_results['AUC-ROC'], test_results['AP']
+            
+            print(f'Epoch {epoch}: Training Loss = {train_loss:.4f}, Test AUC = {auroc:.4f}, Test AUPRC = {auprc:.4f}')
+            
+            # Save results every epoch_interval
+            if epoch % epoch_interval == 0:
+                if epoch not in epoch_results:
+                    epoch_results[epoch] = {
+                        'aurocs': [],
+                        'auprcs': []
+                    }
+                epoch_results[epoch]['aurocs'].append(auroc)
+                epoch_results[epoch]['auprcs'].append(auprc)
+    
+    return auroc, epoch_results
+
+
+#%%
+if __name__ == '__main__':
+    ad_aucs = []
+    epoch_results = {}
+    
+    loaders, meta = get_ad_dataset_Tox21(dataset_name, batch_size, test_batch_size)
+    
+    start_time = time.time()
+    
+    ad_auc, epoch_results = run(
+        dataset_name,
+        random_seed,
+        device=device,
+        epoch_results=epoch_results
+        )
+        
+    ad_aucs.append(ad_auc)
+        
+    # 각 에폭별 평균 성능 계산
+    epoch_means = {}
+    epoch_stds = {}
+    for epoch in epoch_results.keys():
+        epoch_means[epoch] = {
+            'auroc': np.mean(epoch_results[epoch]['aurocs']),
+            'auprc': np.mean(epoch_results[epoch]['auprcs'])
+        }
+        epoch_stds[epoch] = {
+            'auroc': np.std(epoch_results[epoch]['aurocs']),
+            'auprc': np.std(epoch_results[epoch]['auprcs'])
+        }
+    
+    # 최고 성능을 보인 에폭 찾기
+    best_epoch = max(epoch_means.keys(), key=lambda x: epoch_means[x]['auroc'])
+    
+    # 결과 출력
+    print("\n=== Performance at every 10 epochs (averaged over all folds) ===")
+    for epoch in sorted(epoch_means.keys()):
+        print(f"Epoch {epoch}: AUROC = {epoch_means[epoch]['auroc']:.4f} ± {epoch_stds[epoch]['auroc']:.4f}")
+    
+    print(f"\nBest average performance achieved at epoch {best_epoch}:")
+    print(f"AUROC = {epoch_means[best_epoch]['auroc']:.4f} ± {epoch_stds[best_epoch]['auroc']:.4f}")
+    print(f"AUPRC = {epoch_means[best_epoch]['auprc']:.4f} ± {epoch_stds[best_epoch]['auprc']:.4f}")
+    
+    # 최종 결과 저장
+    results = 'AUC: {:.2f}+-{:.2f}'.format(np.mean(ad_aucs) * 100, np.std(ad_aucs) * 100)
+    print('[FINAL RESULTS] ' + results)
+
+# %%
+def visualize_molecular_graph(x, edge_index, batch, y, idx=0):
+    """
+    분자 그래프를 레이블에 따라 다르게 시각화하는 함수
+    
+    Parameters:
+    x: 노드 특성 텐서
+    edge_index: 엣지 인덱스 텐서
+    batch: 배치 할당 텐서
+    y: 레이블 텐서 (0 또는 1)
+    idx: 시각화할 그래프의 인덱스 (배치 내)
+    """
+    # 특정 분자 그래프의 노드 인덱스 추출
+    mask = batch == idx
+    sub_x = x[mask]
+    
+    # edge_index 필터링
+    edge_mask = mask[edge_index[0]] & mask[edge_index[1]]
+    sub_edge_index = edge_index[:, edge_mask]
+    
+    # 노드 인덱스 매핑 생성
+    idx_map = torch.zeros(mask.size(0), dtype=torch.long)
+    idx_map[mask] = torch.arange(mask.sum())
+    sub_edge_index = idx_map[sub_edge_index]
+    
+    # NetworkX 그래프 생성
+    G = nx.Graph()
+    
+    # 노드 추가
+    for i in range(len(sub_x)):
+        G.add_node(i)
+    
+    # 엣지 추가
+    edges = sub_edge_index.t().tolist()
+    G.add_edges_from(edges)
+    
+    # 그래프 레이아웃 계산
+    pos = nx.spring_layout(G)
+    
+    # 레이블에 따른 색상 및 제목 설정
+    if y[idx] == 0:
+        node_color = 'lightblue'
+        title = 'Molecular Graph (Normal)'
+        edge_color = 'gray'
+    else:
+        node_color = 'salmon'
+        title = 'Molecular Graph (Anomaly)'
+        edge_color = 'darkred'
+    
+    # 시각화
+    plt.figure(figsize=(10, 10))
+    nx.draw(G, pos, 
+            node_color=node_color,
+            node_size=500,
+            with_labels=True,
+            font_size=12,
+            font_weight='bold',
+            edge_color=edge_color,
+            width=2,
+            alpha=0.7)
+    
+    # 레이블 정보 추가
+    plt.title(f'{title} (Label: {y[idx].item()})')
+    plt.axis('off')
+    plt.show()
+
+def visualize_batch_examples(x, edge_index, batch, y, num_examples=4):
+    """
+    배치에서 여러 예제를 한 번에 시각화하는 함수
+    
+    Parameters:
+    x: 노드 특성 텐서
+    edge_index: 엣지 인덱스 텐서
+    batch: 배치 할당 텐서
+    y: 레이블 텐서
+    num_examples: 시각화할 예제 수
+    """
+    num_graphs = batch.max().item() + 1
+    num_examples = min(num_examples, num_graphs)
+    
+    # 서브플롯 격자 크기 계산
+    grid_size = int(np.ceil(np.sqrt(num_examples)))
+    
+    plt.figure(figsize=(5*grid_size, 5*grid_size))
+    for i in range(num_examples):
+        plt.subplot(grid_size, grid_size, i+1)
+        
+        # 특정 분자 그래프의 노드 인덱스 추출
+        mask = batch == i
+        sub_x = x[mask]
+        
+        # edge_index 필터링
+        edge_mask = mask[edge_index[0]] & mask[edge_index[1]]
+        sub_edge_index = edge_index[:, edge_mask]
+        
+        # 노드 인덱스 매핑 생성
+        idx_map = torch.zeros(mask.size(0), dtype=torch.long)
+        idx_map[mask] = torch.arange(mask.sum())
+        sub_edge_index = idx_map[sub_edge_index]
+        
+        # NetworkX 그래프 생성
+        G = nx.Graph()
+        
+        # 노드 추가
+        for j in range(len(sub_x)):
+            G.add_node(j)
+        
+        # 엣지 추가
+        edges = sub_edge_index.t().tolist()
+        G.add_edges_from(edges)
+        
+        # 그래프 레이아웃 계산
+        pos = nx.spring_layout(G)
+        
+        # 레이블에 따른 색상 설정
+        node_color = 'salmon' if y[i] == 1 else 'lightblue'
+        edge_color = 'darkred' if y[i] == 1 else 'gray'
+        
+        # 시각화
+        nx.draw(G, pos, 
+                node_color=node_color,
+                node_size=300,
+                with_labels=True,
+                font_size=8,
+                font_weight='bold',
+                edge_color=edge_color,
+                width=1.5,
+                alpha=0.7)
+        
+        plt.title(f'Label: {y[i].item()}')
+    
+    plt.tight_layout()
+    plt.show()
+
+
+
+data.x
+data.edge_index
+data.node_label
+
+
+# %%
+visualize_batch_examples(data.x, data.edge_index, data.batch, data.y, num_examples=32)
 # %%

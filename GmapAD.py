@@ -58,6 +58,87 @@ import networkx as nx
 
 
 #%%
+'''ARGPARSER'''
+parser = argparse.ArgumentParser()
+
+parser.add_argument("--dataset-name", type=str, default='COX2')
+parser.add_argument("--data-root", type=str, default='./dataset')
+parser.add_argument("--assets-root", type=str, default="./assets")
+
+parser.add_argument("--epochs", type=int, default=150)
+parser.add_argument("--patience", type=int, default=5)
+parser.add_argument("--step-size", type=int, default=20)
+parser.add_argument("--n-cross-val", type=int, default=5)
+parser.add_argument("--random-seed", type=int, default=1)
+parser.add_argument("--batch-size", type=int, default=128)
+parser.add_argument("--log-interval", type=int, default=5)
+parser.add_argument("--n-test-anomaly", type=int, default=400)
+parser.add_argument("--test-batch-size", type=int, default=128)
+parser.add_argument("--hidden-dims", nargs='+', type=int, default=[256])
+
+parser.add_argument("--factor", type=float, default=0.5)
+parser.add_argument("--test-size", type=float, default=0.25)
+parser.add_argument("--dropout-rate", type=float, default=0.1)
+parser.add_argument("--weight-decay", type=float, default=0.0001)
+parser.add_argument("--learning-rate", type=float, default=0.0001)
+
+parser.add_argument("--alpha", type=float, default=1.0)
+parser.add_argument("--beta", type=float, default=0.05)
+parser.add_argument("--gamma", type=float, default=0.1)
+parser.add_argument("--gamma-cluster", type=float, default=0.5)
+parser.add_argument("--node-theta", type=float, default=0.03)
+parser.add_argument("--adj-theta", type=float, default=0.01)
+
+try:
+    args = parser.parse_args()
+except:
+    args = parser.parse_args([])
+
+
+#%%
+'''OPTIONS'''
+data_root: str = args.data_root
+assets_root: str = args.assets_root
+dataset_name: str = args.dataset_name
+
+epochs: int = args.epochs
+patience: int = args.patience
+step_size: int = args.step_size
+batch_size: int = args.batch_size
+n_cross_val: int = args.n_cross_val
+random_seed: int = args.random_seed
+hidden_dims: list = args.hidden_dims
+log_interval: int = args.log_interval
+n_test_anomaly: int = args.n_test_anomaly
+test_batch_size: int = args.test_batch_size
+
+factor: float = args.factor
+test_size: float = args.test_size
+weight_decay: float = args.weight_decay
+dropout_rate: float = args.dropout_rate
+learning_rate: float = args.learning_rate
+
+alpha: float = args.alpha
+beta: float = args.beta
+gamma: float = args.gamma
+gamma_cluster: float = args.gamma_cluster
+node_theta: float = args.node_theta
+adj_theta: float = args.adj_theta
+
+set_seed(random_seed)
+
+device = set_device()
+# device = torch.device("cpu")
+print(f"Using device: {device}")
+
+torch.set_printoptions(edgeitems=3)  # 텐서 출력시 표시되는 요소 수 조정
+torch.backends.cuda.matmul.allow_tf32 = False  # 더 정확한 연산을 위해 False 설정
+
+# CUDA 디버깅 활성화
+os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
+
+
+#%%
 class GmapAD(nn.Module):
     def __init__(self, input_dim, hidden_dim=128, output_dim=64, num_candidates=64, 
                  mutation_rate=0.5, crossover_rate=0.9, pool_size=30):
@@ -77,20 +158,39 @@ class GmapAD(nn.Module):
         x = self.conv2(x, edge_index)
         return x
     
-    def get_initial_candidates(self, node_embeddings, labels, k):
-        # 초기 candidate 선택 - Section 4.2.2
-        normal_mask = labels == 1
-        normal_nodes = node_embeddings[normal_mask]
+    def get_initial_candidates(self, node_embeddings, batch, labels, k):
+        """
+        Args:
+            node_embeddings: 모든 노드의 임베딩 [num_nodes, hidden_dim]
+            batch: 각 노드가 어느 그래프에 속하는지 나타내는 벡터 [num_nodes]
+            labels: 각 그래프의 레이블 [batch_size]
+            k: 선택할 candidate 수
+        """
+        # 먼저 normal 그래프들을 찾음
+        normal_graphs = (labels == 1).nonzero().squeeze()
         
-        # 수식 (4) 구현 - cosine similarity
+        # normal 그래프에 속한 노드들의 마스크 생성
+        normal_node_mask = torch.zeros_like(batch, dtype=torch.bool)
+        for graph_idx in normal_graphs:
+            normal_node_mask |= (batch == graph_idx)
+        
+        # normal 그래프의 노드 임베딩 선택
+        normal_nodes = node_embeddings[normal_node_mask]
+        
+        # 모든 노드와 normal 노드 간의 cosine similarity 계산
         similarities = F.cosine_similarity(
             node_embeddings.unsqueeze(1),
             normal_nodes.unsqueeze(0),
             dim=2
         )
+        
+        # 각 노드에 대해 평균 similarity 계산
         scores = similarities.mean(dim=1)
+        
+        # Top-k 노드 선택
         _, indices = torch.topk(scores, k=min(k, len(scores)))
         return indices
+
     
     def differential_evolution(self, candidates, graph_reprs, labels):
         # 초기 population 생성
@@ -150,14 +250,60 @@ class GmapAD(nn.Module):
         
         return candidates[best_candidate.bool()]
     
+    def compute_similarity(self, graph_repr, candidate_nodes):
+        """수식 (3) 구현"""
+        similarities = []
+        for node in candidate_nodes:
+            # L2 distance 계산
+            sim = torch.norm(graph_repr.unsqueeze(1) - node, p=2, dim=2)
+            similarities.append(sim)
+        return torch.stack(similarities, dim=1)
+
+
+    def compute_score(self, candidate_indices, candidates, graph_reprs, labels):
+        """수식 (5), (6) 구현"""
+        if not candidate_indices.any():
+            return float('inf')
+            
+        selected_candidates = candidates[candidate_indices.bool()]
+        similarities = self.compute_similarity(graph_reprs, selected_candidates)
+        
+        normal_mask = labels == 1
+        anomaly_mask = labels == 0
+        
+        loss = 0
+        if normal_mask.any():
+            normal_loss = F.hinge_embedding_loss(
+                similarities[normal_mask].mean(1),
+                torch.ones(normal_mask.sum()).to(similarities.device),
+                margin=1.0
+            )
+            loss += normal_loss
+        
+        if anomaly_mask.any():
+            anomaly_loss = F.hinge_embedding_loss(
+                similarities[anomaly_mask].mean(1),
+                -torch.ones(anomaly_mask.sum()).to(similarities.device),
+                margin=1.0
+            )
+            loss += anomaly_loss
+            
+        return loss.item()
+
+
     def forward(self, x, edge_index, batch, labels=None):
         # 1. Node representation learning
         node_embeddings = self.encode_nodes(x, edge_index, batch)
         graph_repr = global_mean_pool(node_embeddings, batch)
         
         if self.training and labels is not None:
-            # 2. Initial candidate selection
-            init_candidates = self.get_initial_candidates(node_embeddings, labels, self.num_candidates)
+            # 2. Initial candidate selection - batch 정보 추가
+            init_candidates = self.get_initial_candidates(
+                node_embeddings, 
+                batch,  # batch 정보 전달
+                labels, 
+                self.num_candidates
+            )
             candidate_nodes = node_embeddings[init_candidates]
             
             # 3. DE optimization
@@ -177,18 +323,33 @@ class GmapAD(nn.Module):
 #%%            
 # Loss function for anomaly-aware training
 class AnomalyAwareLoss(nn.Module):
-    def __init__(self):
+    def __init__(self, margin=1.0):
         super(AnomalyAwareLoss, self).__init__()
+        self.margin = margin
         
-    def forward(self, pred, labels):
+    def forward(self, similarities, labels):
         normal_mask = labels == 1
         anomaly_mask = labels == 0
         
-        normal_loss = F.nll_loss(pred[normal_mask], labels[normal_mask])
-        anomaly_loss = F.nll_loss(pred[anomaly_mask], labels[anomaly_mask])
+        loss = 0
+        if normal_mask.any():
+            normal_loss = F.hinge_embedding_loss(
+                similarities[normal_mask].mean(1),
+                torch.ones(normal_mask.sum()).to(similarities.device),
+                margin=self.margin
+            )
+            loss += normal_loss
         
-        return (normal_loss + anomaly_loss) / 2
-
+        if anomaly_mask.any():
+            anomaly_loss = F.hinge_embedding_loss(
+                similarities[anomaly_mask].mean(1),
+                -torch.ones(anomaly_mask.sum()).to(similarities.device),
+                margin=self.margin
+            )
+            loss += anomaly_loss
+            
+        return loss
+    
 
 #%%
 def train_epoch(model, train_loader, optimizer, device):
@@ -329,16 +490,6 @@ def run(dataset_name, random_seed, trial, device, epoch_results=None):
     return auroc, epoch_results
 
 if __name__ == '__main__':
-    # Configuration
-    dataset_name = 'MUTAG'  # or your dataset
-    n_cross_val = 10
-    random_seed = 42
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    batch_size = 32
-    test_batch_size = 32
-    epochs = 100
-    log_interval = 10
-    
     ad_aucs = []
     fold_times = []
     epoch_results = {}
@@ -394,3 +545,5 @@ if __name__ == '__main__':
     print('[FINAL RESULTS] ' + results)
     print(f"Total execution time: {total_time:.2f} seconds")
 
+
+# %%

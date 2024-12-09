@@ -64,7 +64,6 @@ def train_bert_embedding(model, train_loader, bert_optimizer, device):
     num_sample = 0
     
     for data in train_loader:
-        data = process_batch_graphs(data)
         bert_optimizer.zero_grad()
         data = data.to(device)
         x, edge_index, batch, num_graphs, node_label = data.x, data.edge_index, data.batch, data.num_graphs, data.node_label
@@ -100,8 +99,8 @@ def train(model, train_loader, recon_optimizer, device, epoch):
         data = process_batch_graphs(data)
         recon_optimizer.zero_grad()
         data = data.to(device)
-        x, edge_index, batch, num_graphs, node_label, true_stats = data.x, data.edge_index, data.batch, data.num_graphs, data.node_label, data.true_stats
-        
+        x, edge_index, batch, num_graphs, node_label = data.x, data.edge_index, data.batch, data.num_graphs, data.node_label
+        true_stats[:30] = data.true_stats
         # dtype 확인 및 변환
         x = x.float()  # float32로 변환
         node_label = node_label.float()  # float32로 변환
@@ -167,7 +166,6 @@ def evaluate_model(model, test_loader, cluster_centers, n_clusters, gamma_cluste
     
     with torch.no_grad():
         for data in test_loader:
-            data = process_batch_graphs(data)
             data = data.to(device)
             x, edge_index, batch, num_graphs, node_label, true_stats = data.x, data.edge_index, data.batch, data.num_graphs, data.node_label, data.true_stats
             e_cls_output, x_recon, stats_pred = model(x, edge_index, batch, num_graphs)
@@ -336,7 +334,7 @@ def persistence_stats_loss(pred_stats, true_stats):
 '''ARGPARSER'''
 parser = argparse.ArgumentParser()
 
-parser.add_argument("--dataset-name", type=str, default='NCI1')
+parser.add_argument("--dataset-name", type=str, default='COX2')
 parser.add_argument("--data-root", type=str, default='./dataset')
 parser.add_argument("--assets-root", type=str, default="./assets")
 
@@ -1138,5 +1136,3 @@ if __name__ == '__main__':
             'final_auroc_std': float(np.std(ad_aucs))
         }, f, indent=4)
 
-
-# %%

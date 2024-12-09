@@ -51,7 +51,7 @@ from functools import partial
 from multiprocessing import Pool
 
 from module.loss import loss_cal
-from util import set_seed, set_device, EarlyStopping, get_ad_split_TU, get_data_loaders_TU, adj_original, split_batch_graphs, compute_persistence_and_betti, process_batch_graphs
+from util import set_seed, set_device, EarlyStopping, get_ad_split_TU, get_data_loaders_TU, adj_original, split_batch_graphs, compute_persistence_and_betti, process_batch_graphs, get_ad_dataset_Tox21
 
 import networkx as nx
 
@@ -210,9 +210,8 @@ class OCGTL(nn.Module):
         )
         
         # Learnable center for OCC
-        # self.center = nn.Parameter(torch.zeros(hidden_dim))
-        self.center = nn.Parameter(torch.zeros(hidden_dim).normal_(0, 0.1))
-
+        self.center = nn.Parameter(torch.zeros(hidden_dim))
+        
         # Temperature parameter for GTL
         self.temperature = 0.1
         
@@ -253,40 +252,37 @@ class OCGTL(nn.Module):
     def loss(self, ref_embedding, trans_embeddings):
         batch_size = ref_embedding.size(0)
         
-        # OCC Loss with numerical stability
+        # OCC Loss (eq. 3)
         occ_loss = sum(
-            torch.norm(embedding - self.center, p=2, dim=1).clamp(min=1e-8).mean()
+            torch.norm(embedding - self.center, p=2, dim=1).mean()
             for embedding in trans_embeddings
         )
         
-        # GTL Loss with numerical stability
+        # GTL Loss (eq. 2)
         gtl_loss = 0
         for k, trans_emb in enumerate(trans_embeddings):
-            # Add small epsilon for numerical stability
-            eps = 1e-8
-            
             # Compute similarities
-            pos_sim = (F.cosine_similarity(trans_emb, ref_embedding) + eps) / self.temperature
+            pos_sim = F.cosine_similarity(trans_emb, ref_embedding) / self.temperature
             
             # Compute similarities with other transformations
             neg_sims = torch.stack([
-                (F.cosine_similarity(trans_emb, other_emb) + eps) / self.temperature
+                F.cosine_similarity(trans_emb, other_emb) / self.temperature
                 for i, other_emb in enumerate(trans_embeddings)
                 if i != k
             ])
             
-            # Compute loss terms with stability
+            # Compute loss terms
             pos_term = torch.exp(pos_sim)
             neg_term = torch.sum(torch.exp(neg_sims), dim=0)
             
-            # Add to GTL loss with log stability
-            gtl_loss -= torch.mean(torch.log(pos_term / (pos_term + neg_term + eps)))
+            # Add to GTL loss
+            gtl_loss -= torch.mean(torch.log(pos_term / (pos_term + neg_term)))
         
-        # Total loss
+        # Total loss (eq. 1)
         total_loss = occ_loss + gtl_loss
         
         return total_loss
-    
+
     def score_samples(self, x, edge_index, batch):
         """
         Compute anomaly scores for test samples using only OCC distance
@@ -294,23 +290,18 @@ class OCGTL(nn.Module):
         """
         ref_embedding, trans_embeddings = self.forward(x, edge_index, batch)
         
-        # Compute and stabilize anomaly scores
+        # Compute anomaly scores as the average distance to center for all transformations
         scores = torch.stack([
-            torch.norm(embedding - self.center, p=2, dim=1).clamp(min=1e-8)  # 숫자 안정성을 위한 clamp
+            torch.norm(embedding - self.center, p=2, dim=1)
             for embedding in trans_embeddings
-        ])
-        
-        # Mean over transformations
-        scores = scores.mean(dim=0)
-        
-        # 추가적인 안정성 체크
-        scores = torch.nan_to_num(scores, nan=1e8)  # NaN을 큰 값으로 대체
+        ]).mean(dim=0)
         
         return scores
 
 
 #%%
 def train_epoch(model, train_loader, optimizer, device):
+    """Train for one epoch"""
     model.train()
     total_loss = 0
     num_samples = 0
@@ -325,9 +316,8 @@ def train_epoch(model, train_loader, optimizer, device):
         # Compute loss
         loss = model.loss(ref_emb, trans_embs)
         
-        # Backward pass with gradient clipping
+        # Backward pass and optimize
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         
         batch_size = batch.num_graphs
@@ -336,7 +326,6 @@ def train_epoch(model, train_loader, optimizer, device):
     
     avg_loss = total_loss / num_samples
     return avg_loss
-
 
 def test(model, test_loader, device):
     """Evaluate the model on test set"""
@@ -350,37 +339,24 @@ def test(model, test_loader, device):
         for batch in test_loader:
             batch = batch.to(device)
             
-            try:
-                # Compute anomaly scores
-                scores = model.score_samples(batch.x, batch.edge_index, batch.batch)
-                
-                # Forward pass (for monitoring)
-                ref_emb, trans_embs = model(batch.x, batch.edge_index, batch.batch)
-                loss = model.loss(ref_emb, trans_embs)
-                
-                # Ensure scores are valid
-                scores = scores.cpu().numpy()
-                if np.any(np.isnan(scores)):
-                    scores = np.nan_to_num(scores, nan=np.max(scores[~np.isnan(scores)]) if np.any(~np.isnan(scores)) else 1e8)
-                
-                # Collect results
-                all_scores.extend(scores)
-                all_labels.extend(batch.y.cpu().numpy())
-                
-                batch_size = batch.num_graphs
-                total_loss += loss.item() * batch_size
-                num_samples += batch_size
-                
-            except RuntimeError as e:
-                print(f"Error processing batch: {e}")
-                continue
+            # Compute anomaly scores (distance to center only)
+            scores = model.score_samples(batch.x, batch.edge_index, batch.batch)
+            
+            # Forward pass (for monitoring overall loss)
+            ref_emb, trans_embs = model(batch.x, batch.edge_index, batch.batch)
+            loss = model.loss(ref_emb, trans_embs)
+            
+            # Collect results
+            all_scores.extend(scores.cpu().numpy())
+            all_labels.extend(batch.y.cpu().numpy())
+            
+            batch_size = batch.num_graphs
+            total_loss += loss.item() * batch_size
+            num_samples += batch_size
     
-    # Convert to numpy arrays and ensure no NaN values
+    # Convert to numpy arrays
     all_scores = np.array(all_scores)
     all_labels = np.array(all_labels)
-    
-    # Final sanity check
-    all_scores = np.nan_to_num(all_scores, nan=np.max(all_scores[~np.isnan(all_scores)]) if np.any(~np.isnan(all_scores)) else 1e8)
     
     # Compute metrics
     auroc = roc_auc_score(all_labels, all_scores)
@@ -443,9 +419,12 @@ def run(dataset_name, random_seed, trial, device, epoch_results=None):
     
     train_loader = loaders['train']
     test_loader = loaders['test']
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    # optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     # optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)  # 0.001 -> 0.0001
-
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-5)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=5, verbose=True
+    )
 
     for epoch in range(1, epochs+1):
         # Train
@@ -528,5 +507,206 @@ if __name__ == '__main__':
     print(f"Total execution time: {total_time:.2f} seconds")
     
 
+
+
+# %%
+parser = argparse.ArgumentParser()
+
+parser.add_argument("--dataset-name", type=str, default='Tox21_p53')
+parser.add_argument("--data-root", type=str, default='./dataset')
+parser.add_argument("--assets-root", type=str, default="./assets")
+
+parser.add_argument("--epochs", type=int, default=100)
+parser.add_argument("--patience", type=int, default=5)
+parser.add_argument("--step-size", type=int, default=20)
+parser.add_argument("--n-cross-val", type=int, default=5)
+parser.add_argument("--random-seed", type=int, default=1)
+parser.add_argument("--batch-size", type=int, default=128)
+parser.add_argument("--log-interval", type=int, default=5)
+parser.add_argument("--n-test-anomaly", type=int, default=400)
+parser.add_argument("--test-batch-size", type=int, default=128)
+parser.add_argument("--hidden-dims", nargs='+', type=int, default=[256])
+
+parser.add_argument("--factor", type=float, default=0.5)
+parser.add_argument("--test-size", type=float, default=0.25)
+parser.add_argument("--dropout-rate", type=float, default=0.1)
+parser.add_argument("--weight-decay", type=float, default=0.0001)
+parser.add_argument("--learning-rate", type=float, default=0.0001)
+
+parser.add_argument("--alpha", type=float, default=1.0)
+parser.add_argument("--beta", type=float, default=0.05)
+parser.add_argument("--gamma", type=float, default=0.1)
+parser.add_argument("--gamma-cluster", type=float, default=0.5)
+parser.add_argument("--node-theta", type=float, default=0.03)
+parser.add_argument("--adj-theta", type=float, default=0.01)
+
+try:
+    args = parser.parse_args()
+except:
+    args = parser.parse_args([])
+
+
+#%%
+'''OPTIONS'''
+data_root: str = args.data_root
+assets_root: str = args.assets_root
+dataset_name: str = args.dataset_name
+
+epochs: int = args.epochs
+patience: int = args.patience
+step_size: int = args.step_size
+batch_size: int = args.batch_size
+n_cross_val: int = args.n_cross_val
+random_seed: int = args.random_seed
+hidden_dims: list = args.hidden_dims
+log_interval: int = args.log_interval
+n_test_anomaly: int = args.n_test_anomaly
+test_batch_size: int = args.test_batch_size
+
+factor: float = args.factor
+test_size: float = args.test_size
+weight_decay: float = args.weight_decay
+dropout_rate: float = args.dropout_rate
+learning_rate: float = args.learning_rate
+
+alpha: float = args.alpha
+beta: float = args.beta
+gamma: float = args.gamma
+gamma_cluster: float = args.gamma_cluster
+node_theta: float = args.node_theta
+adj_theta: float = args.adj_theta
+
+set_seed(random_seed)
+
+device = set_device()
+# device = torch.device("cpu")
+print(f"Using device: {device}")
+
+torch.set_printoptions(edgeitems=3)  # 텐서 출력시 표시되는 요소 수 조정
+torch.backends.cuda.matmul.allow_tf32 = False  # 더 정확한 연산을 위해 False 설정
+
+# CUDA 디버깅 활성화
+os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
+
+
+#%%
+if dataset_name == 'AIDS' or dataset_name == 'NCI1' or dataset_name == 'DHFR':
+    dataset_AN = True
+else:
+    dataset_AN = False
+
+loaders, meta = get_ad_dataset_Tox21(dataset_name, batch_size, test_batch_size)
+
+num_train = meta['num_train']
+num_features = meta['num_feat']
+max_nodes = meta['max_nodes']
+
+print(f'Number of graphs: {num_train}')
+print(f'Number of features: {num_features}')
+print(f'Max nodes: {max_nodes}')
+
+current_time_ = time.localtime()
+current_time = time.strftime("%Y_%m_%d_%H_%M", current_time_)
+print(f'random number saving: {current_time}')
+
+
+# %%
+def run(dataset_name, random_seed, device=device, epoch_results=None):
+    if epoch_results is None:
+        epoch_results = {}
+    epoch_interval = 10  # 10 에폭 단위로 비교
+    
+    set_seed(random_seed)
+    all_results = []
+
+    loaders, meta = get_ad_dataset_Tox21(dataset_name, batch_size, test_batch_size)
+
+    num_features = meta['num_feat']
+    max_nodes = meta['max_nodes']
+    
+    # Initialize model
+    model = OCGTL(
+        num_features=num_features,
+        hidden_dim=32,
+        num_layers=4,
+        num_transformations=6
+    ).to(device)
+    
+    train_loader = loaders['train']
+    test_loader = loaders['test']
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    
+    for epoch in range(1, epochs+1):
+        # Train
+        train_loss = train_epoch(model, train_loader, optimizer, device)
+        
+        # Evaluate periodically
+        if epoch % log_interval == 0:
+            # Test
+            test_results = test(model, test_loader, device)
+            auroc, auprc = test_results['AUC-ROC'], test_results['AP']
+            
+            print(f'Epoch {epoch}: Training Loss = {train_loss:.4f}, Test AUC = {auroc:.4f}, Test AUPRC = {auprc:.4f}')
+            
+            # Save results every epoch_interval
+            if epoch % epoch_interval == 0:
+                if epoch not in epoch_results:
+                    epoch_results[epoch] = {
+                        'aurocs': [],
+                        'auprcs': []
+                    }
+                epoch_results[epoch]['aurocs'].append(auroc)
+                epoch_results[epoch]['auprcs'].append(auprc)
+    
+    return auroc, epoch_results
+
+
+#%%
+if __name__ == '__main__':
+    ad_aucs = []
+    epoch_results = {}
+    
+    loaders, meta = get_ad_dataset_Tox21(dataset_name, batch_size, test_batch_size)
+    
+    start_time = time.time()
+    
+    ad_auc, epoch_results = run(
+        dataset_name,
+        random_seed,
+        device=device,
+        epoch_results=epoch_results
+        )
+        
+    ad_aucs.append(ad_auc)
+        
+    # 각 에폭별 평균 성능 계산
+    epoch_means = {}
+    epoch_stds = {}
+    for epoch in epoch_results.keys():
+        epoch_means[epoch] = {
+            'auroc': np.mean(epoch_results[epoch]['aurocs']),
+            'auprc': np.mean(epoch_results[epoch]['auprcs'])
+        }
+        epoch_stds[epoch] = {
+            'auroc': np.std(epoch_results[epoch]['aurocs']),
+            'auprc': np.std(epoch_results[epoch]['auprcs'])
+        }
+    
+    # 최고 성능을 보인 에폭 찾기
+    best_epoch = max(epoch_means.keys(), key=lambda x: epoch_means[x]['auroc'])
+    
+    # 결과 출력
+    print("\n=== Performance at every 10 epochs (averaged over all folds) ===")
+    for epoch in sorted(epoch_means.keys()):
+        print(f"Epoch {epoch}: AUROC = {epoch_means[epoch]['auroc']:.4f} ± {epoch_stds[epoch]['auroc']:.4f}")
+    
+    print(f"\nBest average performance achieved at epoch {best_epoch}:")
+    print(f"AUROC = {epoch_means[best_epoch]['auroc']:.4f} ± {epoch_stds[best_epoch]['auroc']:.4f}")
+    print(f"AUPRC = {epoch_means[best_epoch]['auprc']:.4f} ± {epoch_stds[best_epoch]['auprc']:.4f}")
+    
+    # 최종 결과 저장
+    results = 'AUC: {:.2f}+-{:.2f}'.format(np.mean(ad_aucs) * 100, np.std(ad_aucs) * 100)
+    print('[FINAL RESULTS] ' + results)
 
 # %%
