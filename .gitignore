@@ -3,3 +3,5 @@ error_distribution_plot
 cross_val_results/
 density_analysis/
 .vscode
+save/
+comparing/
